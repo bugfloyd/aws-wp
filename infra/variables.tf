@@ -21,3 +21,28 @@ variable "domains" {
   description = "Map of domain names to their Route 53 hosted zone IDs"
   type        = map(string)
 }
+
+variable "aws_region_backup" {
+  default = "eu-west-1"
+  type    = string
+}
+
+variable "backups_bucket_name" {
+  description = "S3 bucket name for Backups"
+  type        = string
+}
+
+variable "s3_backup_dir" {
+  type    = string
+  default = "wp-backups"
+}
+
+variable "cloudfront_logging_bucket_name" {
+  description = "S3 bucket name for CloudFront logs"
+  type        = string
+}
+
+variable "webserver_http_port" {
+  type    = number
+  default = 80
+}
