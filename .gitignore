@@ -40,3 +40,6 @@ backend_config.hcl
 
 .env
 deploy_backup_*.log
+
+_scratch/
+.idea/
