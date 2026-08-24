@@ -24,35 +24,36 @@ resource "aws_sns_topic_subscription" "alerts_email" {
   endpoint  = var.alert_email
 }
 
-# The load balancer's own view of whether the site is up.
+# Instance health.
 #
-# This is the alarm that would have caught the bug where every health check
-# received a 404 because the check addresses targets by IP and cannot send a
-# Host header. The site still answered for a human hitting the real domain, so
-# the only visible symptom was instances being replaced forever.
-resource "aws_cloudwatch_metric_alarm" "unhealthy_targets" {
-  alarm_name          = "websites-unhealthy-targets"
-  alarm_description   = "One or more web instances are failing their load balancer health check"
-  namespace           = "AWS/ApplicationELB"
-  metric_name         = "UnHealthyHostCount"
+# This replaces the load balancer's target health check, which does not exist
+# at this stage. It is a weaker signal and worth being honest about: it catches
+# the instance being dead, not the web server being broken while the instance
+# is fine. The Scalable stage restores a real health check by putting a load
+# balancer in front, which also lets a failed instance be replaced rather than
+# merely reported.
+resource "aws_cloudwatch_metric_alarm" "instance_status" {
+  alarm_name          = "websites-instance-status-failed"
+  alarm_description   = "The web server instance is failing its EC2 status checks"
+  namespace           = "AWS/EC2"
+  metric_name         = "StatusCheckFailed"
   statistic           = "Maximum"
   period              = 60
   evaluation_periods  = 3
   comparison_operator = "GreaterThanThreshold"
   threshold           = 0
-  treat_missing_data  = "notBreaching"
+  treat_missing_data  = "breaching"
 
   dimensions = {
-    LoadBalancer = aws_lb.load_balancer.arn_suffix
-    TargetGroup  = aws_lb_target_group.lb_target_group_websites.arn_suffix
+    InstanceId = aws_instance.webserver.id
   }
 
   alarm_actions = [aws_sns_topic.alerts.arn]
   ok_actions    = [aws_sns_topic.alerts.arn]
 
   tags = {
-    Name       = "WebsitesUnhealthyTargetsAlarm"
-    CostCenter = "Bugfloyd/Websites/Network"
+    Name       = "WebsitesInstanceStatusAlarm"
+    CostCenter = "Bugfloyd/Websites/Instance"
   }
 }
 

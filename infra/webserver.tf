@@ -1,3 +1,13 @@
+# The web server.
+#
+# One instance, deliberately. This stage is about removing state from the
+# instance, not about running several of them - the Scalable stage introduces
+# a load balancer and an Auto Scaling group. Keeping the shape of the previous
+# stage means the difference between them is exactly the thing being taught.
+#
+# Everything that makes this instance serve a site happens in user_data at
+# first boot, so it can be destroyed and recreated without losing anything.
+
 resource "aws_key_pair" "websites_key_pair" {
   key_name   = "WebsitesKeyPair"
   public_key = var.admin_public_key
@@ -8,147 +18,55 @@ resource "aws_key_pair" "websites_key_pair" {
   }
 }
 
-# Launch Template
-resource "aws_launch_template" "wordpress" {
-  name_prefix   = "wordpress-"
-  image_id      = var.ols_image_id
-  instance_type = var.instance_type
-  key_name      = aws_key_pair.websites_key_pair.key_name
-
+resource "aws_instance" "webserver" {
+  ami                    = var.ols_image_id
+  instance_type          = var.instance_type
+  subnet_id              = aws_subnet.public_a.id
   vpc_security_group_ids = [aws_security_group.ec2_web.id]
+  key_name               = aws_key_pair.websites_key_pair.key_name
+  iam_instance_profile   = aws_iam_instance_profile.ols_instance_profile.name
 
-  iam_instance_profile {
-    name = aws_iam_instance_profile.ols_instance_profile.name
+  root_block_device {
+    volume_size           = 20
+    volume_type           = "gp3"
+    encrypted             = true
+    delete_on_termination = true
   }
 
-  block_device_mappings {
-    device_name = "/dev/xvda"
-    ebs {
-      volume_size           = 20
-      volume_type           = "gp3"
-      encrypted             = true
-      delete_on_termination = true
-    }
-  }
+  user_data = local.bootstrap
 
-  user_data = base64encode(local.bootstrap)
-
-
-  tag_specifications {
-    resource_type = "instance"
-    tags = {
-      Name       = "WordPress-AutoScaling"
-      CostCenter = "Bugfloyd/Websites/Instance"
-    }
-  }
+  # Rebuild the instance when the bootstrap changes, rather than leaving a
+  # running box configured by a script it no longer matches. This is what keeps
+  # the instance disposable in practice and not just in principle.
+  user_data_replace_on_change = true
 
   tags = {
-    Name       = "WordPressLaunchTemplate"
+    Name       = "WebserverInstance"
     CostCenter = "Bugfloyd/Websites/Instance"
   }
 }
 
-# Auto Scaling Group
-resource "aws_autoscaling_group" "wordpress" {
-  name = "wordpress-asg"
-  # Single AZ for the Stateless stage. Spreading the web tier across two zones
-  # while the database and the NAT gateway both sit in one would be theatre:
-  # losing that zone takes the site down regardless of where the instances are.
-  # The Resilient stage widens this to both private subnets at the same time as
-  # it makes the database and egress path multi-AZ.
-  vpc_zone_identifier = [aws_subnet.private_a.id]
-  target_group_arns   = [aws_lb_target_group.lb_target_group_websites.arn]
-  health_check_type   = "ELB"
-  # Generous: a cold instance mounts EFS, may install WordPress, and restarts
-  # OpenLiteSpeed before it can serve anything. Too short and the group kills
-  # instances mid-provision, which never resolves on its own.
-  health_check_grace_period = 600
+# CloudFront needs an origin hostname that survives the instance being
+# replaced. Without an Elastic IP the public DNS name changes on every rebuild
+# and every distribution silently points at nothing.
+resource "aws_eip" "webserver" {
+  instance = aws_instance.webserver.id
+  domain   = "vpc"
 
-  min_size         = var.asg_min_size
-  max_size         = var.asg_max_size
-  desired_capacity = var.asg_desired_capacity
-
-  launch_template {
-    id      = aws_launch_template.wordpress.id
-    version = "$Latest"
+  tags = {
+    Name       = "WebserverElasticIP"
+    CostCenter = "Bugfloyd/Websites/Instance"
   }
 
-  # Instance refresh for zero-downtime updates
-  # Explicit launch-before-terminate. At a desired capacity of 1, a minimum
-  # healthy percentage below 100 permits terminating the only instance first,
-  # which is a visible outage on every configuration change. Requiring 100%
-  # healthy and allowing 200% gives the group room to bring a replacement into
-  # service before retiring the old one - so max_size must be at least
-  # desired_capacity + 1 for a refresh to make progress.
-  instance_refresh {
-    strategy = "Rolling"
-    preferences {
-      min_healthy_percentage = 100
-      max_healthy_percentage = 200
-    }
-  }
-
-  tag {
-    key                 = "Name"
-    value               = "WordPress-ASG"
-    propagate_at_launch = false
-  }
-
-  tag {
-    key                 = "CostCenter"
-    value               = "Bugfloyd/Websites/Instance"
-    propagate_at_launch = true
-  }
+  depends_on = [aws_internet_gateway.internet_gateway]
 }
 
-# Auto Scaling Policies
-resource "aws_autoscaling_policy" "scale_up" {
-  name                   = "wordpress-scale-up"
-  scaling_adjustment     = 1
-  adjustment_type        = "ChangeInCapacity"
-  cooldown               = 300
-  autoscaling_group_name = aws_autoscaling_group.wordpress.name
+output "webserver_public_ip" {
+  description = "Stable public address of the web server"
+  value       = aws_eip.webserver.public_ip
 }
 
-resource "aws_autoscaling_policy" "scale_down" {
-  name                   = "wordpress-scale-down"
-  scaling_adjustment     = -1
-  adjustment_type        = "ChangeInCapacity"
-  cooldown               = 300
-  autoscaling_group_name = aws_autoscaling_group.wordpress.name
-}
-
-# CloudWatch Alarms
-resource "aws_cloudwatch_metric_alarm" "cpu_high" {
-  alarm_name          = "wordpress-cpu-high"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = "2"
-  metric_name         = "CPUUtilization"
-  namespace           = "AWS/EC2"
-  period              = "300"
-  statistic           = "Average"
-  threshold           = "75"
-  alarm_description   = "This metric monitors ec2 cpu utilization"
-  alarm_actions       = [aws_autoscaling_policy.scale_up.arn]
-
-  dimensions = {
-    AutoScalingGroupName = aws_autoscaling_group.wordpress.name
-  }
-}
-
-resource "aws_cloudwatch_metric_alarm" "cpu_low" {
-  alarm_name          = "wordpress-cpu-low"
-  comparison_operator = "LessThanThreshold"
-  evaluation_periods  = "2"
-  metric_name         = "CPUUtilization"
-  namespace           = "AWS/EC2"
-  period              = "300"
-  statistic           = "Average"
-  threshold           = "25"
-  alarm_description   = "This metric monitors ec2 cpu utilization"
-  alarm_actions       = [aws_autoscaling_policy.scale_down.arn]
-
-  dimensions = {
-    AutoScalingGroupName = aws_autoscaling_group.wordpress.name
-  }
+output "webserver_public_dns" {
+  description = "Origin hostname the CloudFront distributions point at"
+  value       = aws_eip.webserver.public_dns
 }

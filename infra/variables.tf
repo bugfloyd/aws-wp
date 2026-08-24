@@ -28,8 +28,9 @@ variable "cloudfront_logging_bucket_name" {
 }
 
 variable "webserver_http_port" {
-  type    = number
-  default = 80
+  description = "Port OpenLiteSpeed listens on. CloudFront reaches it over plain HTTP; TLS is terminated at the edge"
+  type        = number
+  default     = 80
 }
 variable "db_instance_class" {
   description = "RDS instance class. Note Performance Insights requires db.t4g.small or larger"
@@ -74,7 +75,7 @@ variable "db_skip_final_snapshot" {
 }
 
 variable "php_children" {
-  description = "Ceiling on LSPHP worker processes for the whole server. Children are forked on demand, so idle sites cost nothing - but the ceiling must fit in instance memory at roughly 40-60 MB each, because a burst can reach it. 12 leaves headroom on a 1 GiB instance"
+  description = "Ceiling on LSPHP worker processes for the whole server. Children are forked on demand, so idle sites cost nothing - but the ceiling must fit in instance memory at roughly 40-60 MB each, because a burst can reach it"
   type        = number
   default     = 15
 }
@@ -83,24 +84,6 @@ variable "instance_type" {
   description = "Web tier instance type. Memory is the binding constraint: it has to hold the OS, OpenLiteSpeed and php_children workers"
   type        = string
   default     = "t3.micro"
-}
-
-variable "asg_min_size" {
-  description = "Minimum instances. At 1, an instance failure is a short outage while a replacement boots and bootstraps"
-  type        = number
-  default     = 1
-}
-
-variable "asg_desired_capacity" {
-  description = "Instances to run in steady state"
-  type        = number
-  default     = 1
-}
-
-variable "asg_max_size" {
-  description = "Maximum instances. Must exceed desired_capacity, or a rolling refresh has no room to launch a replacement before retiring the old instance"
-  type        = number
-  default     = 2
 }
 
 variable "enable_ols_cache" {

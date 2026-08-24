@@ -13,21 +13,19 @@ variable "logging_bucket" {
   type        = string
 }
 
-variable "load_balancer_arn" {
-  description = "Load balancer ARN"
-  type        = string
-}
-
-variable "lb_websites_tg_arn" {
-  type        = string
-}
-
-variable "lb_dns_name" {
-  type        = string
-}
-
 variable "disable_cache" {
   description = "Disable caching by using AWS Managed-CachingDisabled policy"
   type        = bool
   default     = false
+}
+
+variable "instance_public_dns" {
+  description = "Public DNS name of the web server, used as the CloudFront origin"
+  type        = string
+}
+
+variable "origin_http_port" {
+  description = "Port the web server listens on"
+  type        = number
+  default     = 80
 }

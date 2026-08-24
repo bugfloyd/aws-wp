@@ -12,23 +12,19 @@ you are reading — `main` is always the newest stage and will not match earlier
 
 | Stage | Tag | What it adds | Rough cost | Post |
 | ----- | --- | ------------ | ---------- | ---- |
-| Minimal | [`v1-minimal`](../../tree/v1-minimal) | One EC2 instance in a public subnet, Route 53 A-records straight to its IP. No load balancer, no CDN, nothing shared. | ~$25/mo | [Beginners Guide: The Most Minimal & Cost-Effective Setup](https://bugfloyd.com/beginners-guide-minimal-wordpress-hosting-aws-terraform-openlitespeed) |
-| Stateless | [`v2-stateless`](../../tree/v2-stateless) | EFS for the document root, RDS for the database, and instances that configure themselves at boot. The Auto Scaling group becomes real: any instance can be replaced without losing anything. | ~$117/mo | _in progress_ |
-| Resilient | _planned_ | Removes the single points of failure: Auto Scaling group across both AZs, a NAT gateway per AZ, and RDS Multi-AZ. | ~$164/mo | _planned_ |
-| Cached | _planned_ | ElastiCache plus the LiteSpeed Cache plugin, and an S3 origin for static assets. | ~$187/mo | _planned_ |
-| Reference | _planned_ | Aurora with a read replica and a CloudWatch dashboard, completing the AWS reference architecture. | ~$256/mo | _planned_ |
+| Minimal | [`v1-minimal`](../../tree/v1-minimal) | One EC2 instance in a public subnet, Route 53 A-records straight to its IP, Let's Encrypt on the box. | ~$25/mo | [Beginners Guide: The Most Minimal & Cost-Effective Setup](https://bugfloyd.com/beginners-guide-minimal-wordpress-hosting-aws-terraform-openlitespeed) |
+| Stateless | [`v2-stateless`](../../tree/v2-stateless) | Files move to EFS, the database to RDS, certificates to ACM behind CloudFront. The instance configures itself at boot and holds nothing — destroy it and rebuild and the site is unchanged. Still one instance. | ~$33/mo | _in progress_ |
+| Scalable | _planned_ | Private subnets, a NAT gateway, an application load balancer and an Auto Scaling group. One instance becomes many. | ~$100/mo | _planned_ |
+| Resilient | _planned_ | Removes the single points of failure: instances across both AZs, a NAT gateway per AZ, and RDS Multi-AZ. | ~$150/mo | _planned_ |
+| Cached | _planned_ | ElastiCache plus the LiteSpeed Cache plugin, and an S3 origin for static assets. | ~$173/mo | _planned_ |
+| Reference | _planned_ | Aurora with a read replica and a CloudWatch dashboard, completing the AWS reference architecture. | ~$257/mo | _planned_ |
 
 > [!NOTE]
-> **`v2-stateless` is deliberately single-AZ.** The web tier, the database and the NAT
-> gateway all live in one Availability Zone. Spreading the instances across two while the
-> database and the egress path stayed in one would look like redundancy without being it —
-> losing that zone takes the site down either way. The Resilient stage makes all three
-> multi-AZ together.
->
-> It still runs two instances, because the benefit there is instance-level rather than
-> zone-level: EC2 hosts fail and get retired individually, and every configuration change
-> goes out as a new image and a rolling refresh, which is seamless with two and an outage
-> with one.
+> **`v2-stateless` runs a single instance, deliberately.** This stage is about removing
+> state from the instance, not about running several of them — so it keeps the previous
+> stage's shape and changes only where files, the database and certificates live. That makes
+> the diff between the two posts exactly the thing being taught. The Scalable stage adds a
+> load balancer and an Auto Scaling group.
 
 ## Layout
 
@@ -40,33 +36,28 @@ you are reading — `main` is always the newest stage and will not match earlier
 Both use an S3 backend with native state locking (`use_lockfile`), configured through a
 `backend_config.hcl` that is not committed.
 
-## Scaling
+## Sizing
 
-The Auto Scaling group runs **1 `t3.micro` instance** in one Availability Zone, with a
-ceiling of 2. It scales on CPU: out at 75%, in at 25%, each over two five-minute periods
-with a five-minute cooldown. Health is judged by the load balancer, with a ten-minute grace
-period so a cold instance can mount storage and install WordPress before it is assessed.
-Instance type and all three size bounds are variables.
-
-`max_size` has to stay above `desired_capacity`: a rolling refresh needs room to bring a
-replacement into service before retiring the old instance, which is what makes a
-configuration change seamless rather than an outage. At a desired capacity of 1, an
-*unplanned* instance failure is still a three to four minute outage while a replacement
-boots and bootstraps — that is the trade for running one instance, and it is a reasonable
-one at low traffic.
+One `t3.micro` — 2 vCPU, 1 GiB. With `php_children = 15` a running instance sits around
+330 MB of 909 MB, so there is comfortable headroom for four low-traffic sites. Instance type
+and worker count are both variables.
 
 **`php_children` is a ceiling, not an allocation.** LSAPI forks workers on demand, so idle
-sites cost nothing. But it has to fit in memory when a burst reaches it: on a 1 GiB
-instance roughly 300 MB goes to the OS, OpenLiteSpeed and the SSM agent, leaving room for
-about fifteen workers at 40–60 MB each. Raise the instance type before raising this.
+sites cost nothing. But the ceiling has to fit in memory when a burst reaches it — roughly
+40–60 MB per worker, against about 700 MB left after the OS, OpenLiteSpeed and the SSM
+agent. Raise the instance type before raising this.
 
-Two caveats worth knowing before you rely on it. **CPU is a weak signal for WordPress**,
-which usually saturates on the database or on IO while CPU stays unremarkable — target
-tracking on `RequestCountPerTarget` measures what actually degrades. And **the end-to-end
-reaction is around fifteen minutes** once evaluation periods, cooldown and boot time are
-added up, so this handles sustained load rather than spikes.
+There is no Auto Scaling group at this stage and no load balancer health check, so nothing
+watches whether the site is actually responding — an EC2 status-check alarm catches the
+instance dying, not OpenLiteSpeed breaking while the instance is fine. The Scalable stage
+fixes both by putting a load balancer in front.
 
 ## How an instance configures itself
+
+Three kinds of state used to live on the instance: **files**, the **database**, and
+**certificates**. This stage moves all three off — to EFS, to RDS, and to ACM behind
+CloudFront. What is left is a machine that can be destroyed and rebuilt without losing
+anything, which is what `user_data_replace_on_change` makes routine rather than theoretical.
 
 The AMI is a bare OpenLiteSpeed install — no virtual host, no domain mapping, no WordPress.
 Everything that makes an instance serve a site happens at first boot:
@@ -79,10 +70,13 @@ Everything that makes an instance serve a site happens at first boot:
    domain that does not have it yet
 5. Start OpenLiteSpeed
 
-Because every instance does this identically, instances are interchangeable. Configuration
-changes go through a new launch template version and a rolling refresh rather than through
-a console — including changes to the OpenLiteSpeed config, whose content hash is stamped
-into the launch template for exactly that reason.
+Configuration changes go through a rebuild rather than through a console. The rendered
+OpenLiteSpeed config lives in S3 and its content hash is stamped into the instance's user
+data, so changing it replaces the instance instead of leaving a running box configured by a
+script it no longer matches.
+
+TLS is terminated at CloudFront with an ACM certificate and the origin is reached over plain
+HTTP, so there is no certificate on the instance and nothing to renew.
 
 ## Related projects
 
@@ -137,32 +131,39 @@ terraform apply
 
 To tear everything down, `terraform destroy` in `infra/` first, then `hostedzones/`.
 
-## Reaching a private instance
+## Reaching the instance
 
-Nothing is publicly reachable: the instances have no public IPs, there is no bastion, and
-the load balancer only serves the site. Use the EC2 Instance Connect endpoint:
+The instance is publicly routable but not publicly reachable: its security group allows port
+80 from CloudFront's managed prefix list only. Two ways in:
 
 ```sh
-# a shell
-aws ec2-instance-connect ssh --instance-id i-xxxx --connection-type eice
+# Session Manager — no inbound rule, no key, and it logs to CloudTrail
+aws ssm start-session --target i-xxxx
 
-# the OpenLiteSpeed console, which listens on the loopback interface only
-aws ec2-instance-connect open-tunnel --instance-id i-xxxx --remote-port 22 --local-port 2222 &
-ssh -N -L 7080:127.0.0.1:7080 -p 2222 ubuntu@localhost
+# run something on it without a shell
+aws ssm send-command --targets Key=tag:Name,Values=WebserverInstance \
+  --document-name AWS-RunShellScript --parameters 'commands=["systemctl is-active lsws"]'
+```
+
+SSH from the addresses in `admin_ips` is kept as a fallback for when the SSM agent itself is
+what is broken.
+
+The OpenLiteSpeed console listens on the loopback interface only, so it needs a forward:
+
+```sh
+aws ssm start-session --target i-xxxx \
+  --document-name AWS-StartPortForwardingSession \
+  --parameters '{"portNumber":["7080"],"localPortNumber":["7080"]}'
 # then https://localhost:7080
 ```
 
-The WebAdmin password is in Parameter Store at `/websites/ols/admin-password`. Note that
-anything changed through that console is lost at the next instance refresh.
-
-The instances also register with Systems Manager, so `aws ssm start-session` works, and
-`aws ssm send-command` can query or act on the whole group at once — which SSH cannot.
+The password is in Parameter Store at `/websites/ols/admin-password`. Anything changed
+through that console is lost the next time the instance is replaced.
 
 ## Alerting
 
-CloudWatch alarms cover EFS burst credits, EFS IO limit, RDS free storage, and unhealthy
-load balancer targets. They publish to an SNS topic with an email subscription set by
-`alert_email`.
+CloudWatch alarms cover EFS burst credits, EFS IO limit, RDS free storage, and EC2 status
+checks. They publish to an SNS topic with an email subscription set by `alert_email`.
 
 > [!IMPORTANT]
 > AWS emails a confirmation link when the subscription is created, and Terraform cannot

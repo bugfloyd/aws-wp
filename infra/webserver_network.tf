@@ -1,24 +1,31 @@
-# Security Group for EC2 Instance
+# Only CloudFront may reach the web server, and only on the port it serves.
+#
+# The managed prefix list covers CloudFront's origin-facing ranges, so the
+# instance is publicly routable but not publicly reachable. TLS is terminated
+# at CloudFront with an ACM certificate, which is why there is no 443 rule and
+# no certificate on the instance at all.
 resource "aws_security_group" "ec2_web" {
   name        = "WebsitesInstanceSecurityGroupWeb"
-  description = "Security Group for WordPress EC2 to allow HTTP from LoadBalancer only"
+  description = "Security Group for the WordPress instance: HTTP from CloudFront, SSH from admin"
   vpc_id      = aws_vpc.bugfloyd.id
 
   ingress {
-    description     = "Allow HTTP from Load Balancer"
+    description     = "Allow HTTP from CloudFront only"
     from_port       = var.webserver_http_port
     to_port         = var.webserver_http_port
     protocol        = "tcp"
-    security_groups = [aws_security_group.load_balancer_sg.id]
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
-
+  # Fallback access. Session Manager is the usual route in - the agent is baked
+  # into the image and needs no inbound rule at all - but a key-based login is
+  # worth keeping for the case where the agent itself is what is broken.
   ingress {
-    description     = "Allow SSH from Instance Connect"
-    from_port       = 22
-    to_port         = 22
-    protocol        = "tcp"
-    security_groups = [aws_security_group.instance_connect_endpoint_sg.id]
+    description = "Allow SSH from admin addresses"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = var.admin_ips
   }
 
   egress {
@@ -34,38 +41,6 @@ resource "aws_security_group" "ec2_web" {
   }
 }
 
-resource "aws_security_group" "instance_connect_endpoint_sg" {
-  name        = "InstanceConnectEndpointSecurityGroup"
-  description = "Security Group for WordPress EC2 instance connect endpoint"
-  vpc_id      = aws_vpc.bugfloyd.id
-
-  ingress {
-    description = "Allow SSH access from a specific IP"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = var.admin_ips
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = {
-    Name       = "WebsitesInstanceConnectEndpointSecurityGroup"
-    CostCenter = "Bugfloyd/Websites/Instance"
-  }
-}
-
-resource "aws_ec2_instance_connect_endpoint" "example" {
-  subnet_id          = aws_subnet.private_a.id
-  security_group_ids = [aws_security_group.instance_connect_endpoint_sg.id]
-
-  tags = {
-    Name       = "WebsitesInstanceConnectEndpoint"
-    CostCenter = "Bugfloyd/Websites"
-  }
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
 }

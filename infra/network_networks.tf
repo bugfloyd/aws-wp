@@ -9,6 +9,10 @@ resource "aws_vpc" "bugfloyd" {
   }
 }
 
+# The web server lives here, reachable from CloudFront over the internet
+# gateway. No NAT gateway is needed because the instance has a public route of
+# its own - which is also why this stage costs a third of what a private
+# subnet plus NAT would.
 resource "aws_subnet" "public_a" {
   vpc_id                  = aws_vpc.bugfloyd.id
   cidr_block              = "20.0.1.0/24"
@@ -21,42 +25,9 @@ resource "aws_subnet" "public_a" {
   }
 }
 
-resource "aws_subnet" "public_b" {
-  vpc_id                  = aws_vpc.bugfloyd.id
-  cidr_block              = "20.0.2.0/24"
-  availability_zone       = data.aws_availability_zones.available.names[1]
-  map_public_ip_on_launch = true
-
-  tags = {
-    Name       = "BugfloydPublicSubnetB"
-    CostCenter = "Bugfloyd/Network"
-  }
-}
-
-resource "aws_subnet" "private_a" {
-  vpc_id                  = aws_vpc.bugfloyd.id
-  cidr_block              = "20.0.11.0/24"
-  availability_zone       = data.aws_availability_zones.available.names[0]
-  map_public_ip_on_launch = false
-
-  tags = {
-    Name       = "BugfloydPrivateSubnetA"
-    CostCenter = "Bugfloyd/Network"
-  }
-}
-
-resource "aws_subnet" "private_b" {
-  vpc_id                  = aws_vpc.bugfloyd.id
-  cidr_block              = "20.0.12.0/24"
-  availability_zone       = data.aws_availability_zones.available.names[1]
-  map_public_ip_on_launch = false
-
-  tags = {
-    Name       = "BugfloydPrivateSubnetB"
-    CostCenter = "Bugfloyd/Network"
-  }
-}
-
+# The data tier. RDS requires a subnet group spanning two Availability Zones
+# even for a single-AZ instance, so these come in a pair; EFS mount targets sit
+# here too. Neither needs a route off the VPC.
 resource "aws_subnet" "data_a" {
   vpc_id                  = aws_vpc.bugfloyd.id
   cidr_block              = "20.0.21.0/24"

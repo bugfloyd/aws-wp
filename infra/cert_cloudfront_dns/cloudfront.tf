@@ -11,27 +11,27 @@ resource "aws_cloudfront_distribution" "cloudfront" {
   is_ipv6_enabled = false
 
   origin {
-    domain_name        = var.lb_dns_name
-    origin_id          = "ALBOrigin"
+    domain_name        = var.instance_public_dns
+    origin_id          = "EC2Origin"
     connection_timeout = 10
 
+    # Plain HTTP to the origin. CloudFront terminates TLS with an ACM
+    # certificate, so the instance holds no certificate and has nothing to
+    # renew - which is the third kind of state this stage removes, after files
+    # and the database. The origin is protected by a security group locked to
+    # CloudFront's own prefix list rather than by a shared secret header.
     custom_origin_config {
-      http_port                = 80
+      http_port                = var.origin_http_port
       https_port               = 443
-      origin_protocol_policy   = "https-only"
+      origin_protocol_policy   = "http-only"
       origin_ssl_protocols     = ["TLSv1.2"]
       origin_keepalive_timeout = 60
       origin_read_timeout      = 30
     }
-
-    custom_header {
-      name  = "X-CloudFront-Auth"
-      value = random_uuid.unique_id.result
-    }
   }
 
   default_cache_behavior {
-    target_origin_id       = "ALBOrigin"
+    target_origin_id       = "EC2Origin"
     viewer_protocol_policy = "redirect-to-https"
 
     allowed_methods = ["HEAD", "DELETE", "POST", "GET", "OPTIONS", "PUT", "PATCH"]
@@ -161,4 +161,3 @@ resource "aws_route53_record" "www_dns_record" {
   }
 }
 
-resource "random_uuid" "unique_id" {}
