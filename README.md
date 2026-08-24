@@ -58,7 +58,7 @@ one at low traffic.
 **`php_children` is a ceiling, not an allocation.** LSAPI forks workers on demand, so idle
 sites cost nothing. But it has to fit in memory when a burst reaches it: on a 1 GiB
 instance roughly 300 MB goes to the OS, OpenLiteSpeed and the SSM agent, leaving room for
-about twelve workers at 40–60 MB each. Raise the instance type before raising this.
+about fifteen workers at 40–60 MB each. Raise the instance type before raising this.
 
 Two caveats worth knowing before you rely on it. **CPU is a weak signal for WordPress**,
 which usually saturates on the database or on IO while CPU stays unremarkable — target
