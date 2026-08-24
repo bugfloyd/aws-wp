@@ -169,8 +169,17 @@ module cache {
 listener wordpress {
   address                 *:${http_port}
   secure                  0
-%{ for domain in domains ~}
+%{ for i, domain in domains ~}
+%{ if i == 0 ~}
+  # The first domain also takes "*", so requests whose Host matches nothing
+  # still reach a virtual host. The load balancer's health check addresses the
+  # target by IP and cannot send a Host header, so without this catch-all every
+  # check gets a 404, every target is marked unhealthy, and the group replaces
+  # instances forever.
+  map                     ${domain} ${domain}, www.${domain}, *
+%{ else ~}
   map                     ${domain} ${domain}, www.${domain}
+%{ endif ~}
 %{ endfor ~}
 }
 
