@@ -42,10 +42,23 @@ Both use an S3 backend with native state locking (`use_lockfile`), configured th
 
 ## Scaling
 
-The Auto Scaling group runs **2 `t3.small` instances** in one Availability Zone, with a
-ceiling of 6. It scales on CPU: out at 75%, in at 25%, each over two five-minute periods
+The Auto Scaling group runs **1 `t3.micro` instance** in one Availability Zone, with a
+ceiling of 2. It scales on CPU: out at 75%, in at 25%, each over two five-minute periods
 with a five-minute cooldown. Health is judged by the load balancer, with a ten-minute grace
 period so a cold instance can mount storage and install WordPress before it is assessed.
+Instance type and all three size bounds are variables.
+
+`max_size` has to stay above `desired_capacity`: a rolling refresh needs room to bring a
+replacement into service before retiring the old instance, which is what makes a
+configuration change seamless rather than an outage. At a desired capacity of 1, an
+*unplanned* instance failure is still a three to four minute outage while a replacement
+boots and bootstraps — that is the trade for running one instance, and it is a reasonable
+one at low traffic.
+
+**`php_children` is a ceiling, not an allocation.** LSAPI forks workers on demand, so idle
+sites cost nothing. But it has to fit in memory when a burst reaches it: on a 1 GiB
+instance roughly 300 MB goes to the OS, OpenLiteSpeed and the SSM agent, leaving room for
+about twelve workers at 40–60 MB each. Raise the instance type before raising this.
 
 Two caveats worth knowing before you rely on it. **CPU is a weak signal for WordPress**,
 which usually saturates on the database or on IO while CPU stays unremarkable — target

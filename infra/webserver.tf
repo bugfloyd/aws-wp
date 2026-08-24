@@ -12,7 +12,7 @@ resource "aws_key_pair" "websites_key_pair" {
 resource "aws_launch_template" "wordpress" {
   name_prefix   = "wordpress-"
   image_id      = var.ols_image_id
-  instance_type = "t3.small"
+  instance_type = var.instance_type
   key_name      = aws_key_pair.websites_key_pair.key_name
 
   vpc_security_group_ids = [aws_security_group.ec2_web.id]
@@ -64,9 +64,9 @@ resource "aws_autoscaling_group" "wordpress" {
   # instances mid-provision, which never resolves on its own.
   health_check_grace_period = 600
 
-  min_size         = 2
-  max_size         = 6
-  desired_capacity = 2
+  min_size         = var.asg_min_size
+  max_size         = var.asg_max_size
+  desired_capacity = var.asg_desired_capacity
 
   launch_template {
     id      = aws_launch_template.wordpress.id
@@ -74,10 +74,17 @@ resource "aws_autoscaling_group" "wordpress" {
   }
 
   # Instance refresh for zero-downtime updates
+  # Explicit launch-before-terminate. At a desired capacity of 1, a minimum
+  # healthy percentage below 100 permits terminating the only instance first,
+  # which is a visible outage on every configuration change. Requiring 100%
+  # healthy and allowing 200% gives the group room to bring a replacement into
+  # service before retiring the old one - so max_size must be at least
+  # desired_capacity + 1 for a refresh to make progress.
   instance_refresh {
     strategy = "Rolling"
     preferences {
-      min_healthy_percentage = 50
+      min_healthy_percentage = 100
+      max_healthy_percentage = 200
     }
   }
 
