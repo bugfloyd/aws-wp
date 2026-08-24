@@ -89,3 +89,8 @@ variable "config_bucket_name" {
   description = "S3 bucket holding the rendered OpenLiteSpeed configuration the instances fetch at boot"
   type        = string
 }
+
+variable "alert_email" {
+  description = "Address that CloudWatch alarms notify. AWS sends a confirmation link that must be clicked once before anything is delivered"
+  type        = string
+}

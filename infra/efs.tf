@@ -80,6 +80,11 @@ resource "aws_cloudwatch_metric_alarm" "efs_burst_credits_low" {
     FileSystemId = aws_efs_file_system.websites.id
   }
 
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
+
+
+
   tags = {
     Name       = "WebsitesEfsBurstCreditsAlarm"
     CostCenter = "Bugfloyd/Websites/Storage"
@@ -104,6 +109,9 @@ resource "aws_cloudwatch_metric_alarm" "efs_io_limit" {
   dimensions = {
     FileSystemId = aws_efs_file_system.websites.id
   }
+
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
 
   tags = {
     Name       = "WebsitesEfsIoLimitAlarm"
