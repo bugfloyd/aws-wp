@@ -22,10 +22,6 @@ variable "lb_websites_tg_arn" {
   type        = string
 }
 
-variable "lb_ols_admin_tg_arn" {
-  type        = string
-}
-
 variable "lb_dns_name" {
   type        = string
 }

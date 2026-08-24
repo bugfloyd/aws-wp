@@ -1,0 +1,33 @@
+docRoot                   $VH_ROOT/html/
+vhDomain                  ${domain}
+vhAliases                 www.${domain}
+enableGzip                1
+enableBr                  1
+
+errorlog $VH_ROOT/logs/error.log {
+  useServer               0
+  logLevel                ERROR
+  rollingSize             10M
+  keepDays                7
+  compressArchive         1
+}
+
+accesslog $VH_ROOT/logs/access.log {
+  useServer               0
+  logFormat               "%v %h %l %u %t \"%r\" %>s %b"
+  logHeaders              7
+  rollingSize             10M
+  keepDays                7
+  compressArchive         1
+}
+
+index  {
+  useServer               0
+  indexFiles              index.php, index.html
+  autoIndex               0
+}
+
+rewrite  {
+  enable                  1
+  autoLoadHtaccess        1
+}

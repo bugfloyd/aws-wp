@@ -1,13 +1,3 @@
-# resource "aws_network_interface" "webserver" {
-#   subnet_id       = aws_subnet.private_a.id
-#   security_groups = [aws_security_group.ec2_web.id]
-#
-#   tags = {
-#     Name       = "WebserverInstanceNetworkInterface"
-#     CostCenter = "Bugfloyd/Websites/Instance"
-#   }
-# }
-
 # Security Group for EC2 Instance
 resource "aws_security_group" "ec2_web" {
   name        = "WebsitesInstanceSecurityGroupWeb"
@@ -22,13 +12,6 @@ resource "aws_security_group" "ec2_web" {
     security_groups = [aws_security_group.load_balancer_sg.id]
   }
 
-  ingress {
-    description     = "Allow TCP 7080 from Load Balancer"
-    from_port       = 7080
-    to_port         = 7080
-    protocol        = "tcp"
-    security_groups = [aws_security_group.load_balancer_sg.id]
-  }
 
   ingress {
     description     = "Allow SSH from Instance Connect"
@@ -78,7 +61,7 @@ resource "aws_security_group" "instance_connect_endpoint_sg" {
 }
 
 resource "aws_ec2_instance_connect_endpoint" "example" {
-  subnet_id = aws_subnet.private_a.id
+  subnet_id          = aws_subnet.private_a.id
   security_group_ids = [aws_security_group.instance_connect_endpoint_sg.id]
 
   tags = {

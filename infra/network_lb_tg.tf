@@ -6,13 +6,18 @@ resource "aws_lb_target_group" "lb_target_group_websites" {
   protocol    = "HTTP"
   target_type = "instance"
 
+  # "/" rather than "/wp-login.php": the bootstrap writes a placeholder index
+  # before WordPress is installed, so a fresh instance passes immediately
+  # instead of being killed mid-provision. The matcher spans redirects because
+  # a freshly installed WordPress sends visitors to the setup screen.
   health_check {
-    path                = "/wp-login.php"
+    path                = "/"
     port                = "traffic-port"
+    matcher             = "200-399"
     interval            = 30
     timeout             = 5
-    healthy_threshold   = 3
-    unhealthy_threshold = 3
+    healthy_threshold   = 2
+    unhealthy_threshold = 5
   }
 
   tags = {
@@ -20,37 +25,3 @@ resource "aws_lb_target_group" "lb_target_group_websites" {
     CostCenter = "Bugfloyd/Websites/Network"
   }
 }
-
-# Target Group for HTTPS (Port 7080)
-resource "aws_lb_target_group" "lb_target_group_ols_admin" {
-  name        = "tg-ols"
-  vpc_id      = aws_vpc.bugfloyd.id
-  port        = 7080
-  protocol    = "HTTPS"
-  target_type = "instance"
-
-  health_check {
-    path                = "/"
-    port                = "traffic-port"
-    interval            = 30
-    timeout             = 5
-    healthy_threshold   = 3
-    unhealthy_threshold = 3
-  }
-
-  tags = {
-    Name       = "WebsitesLbTgOlsAdmin"
-    CostCenter = "Bugfloyd/Websites/Network"
-  }
-}
-
-# Register EC2 Instance to Target Groups
-# resource "aws_lb_target_group_attachment" "tg_websites_http_attachment" {
-#   target_group_arn = aws_lb_target_group.lb_target_group_websites.arn
-#   target_id        = aws_instance.webserver.id
-# }
-#
-# resource "aws_lb_target_group_attachment" "tg_ols_admin_https_attachment" {
-#   target_group_arn = aws_lb_target_group.lb_target_group_ols_admin.arn
-#   target_id        = aws_instance.webserver.id
-# }

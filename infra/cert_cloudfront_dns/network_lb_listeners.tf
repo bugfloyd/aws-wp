@@ -42,25 +42,6 @@ resource "aws_lb_listener" "lb_listener_websites" {
   }
 }
 
-# Listener for HTTPS (Port 7080) - forwards to Target Group OLS
-resource "aws_lb_listener" "lb_listener_ols_admin" {
-  load_balancer_arn = var.load_balancer_arn
-  port              = 7080
-  protocol          = "HTTPS"
-  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
-  certificate_arn   = aws_acm_certificate_validation.lb_cert_validation.certificate_arn
-
-  default_action {
-    type             = "forward"
-    target_group_arn = var.lb_ols_admin_tg_arn
-  }
-
-  tags = {
-    Name       = "WebsitesLoadBalancerListenerOlsAdmin"
-    CostCenter = "Bugfloyd/Websites/Network"
-  }
-}
-
 # Redirect "www.domain.com" to "domain.com"
 resource "aws_lb_listener_rule" "www_redirect_rule" {
   listener_arn = aws_lb_listener.lb_listener_websites.arn

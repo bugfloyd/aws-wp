@@ -20,39 +20,6 @@ resource "aws_iam_role" "instance_role" {
   }
 }
 
-resource "aws_iam_policy" "backup_s3_policy" {
-  name        = "WpBackupS3Policy"
-  description = "Policy for writing backups to S3 without delete access"
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "s3:PutObject",
-          "s3:GetObject",
-          "s3:ListBucket"
-        ]
-        Resource = [
-          "arn:aws:s3:::${aws_s3_bucket.backups_bucket.id}",
-          "arn:aws:s3:::${aws_s3_bucket.backups_bucket.id}/*"
-        ]
-      }
-    ]
-  })
-
-  tags = {
-    Name       = "WebsitesInstancePolicyS3"
-    CostCenter = "Bugfloyd/Websites/Instance"
-  }
-}
-
-resource "aws_iam_role_policy_attachment" "attach_backup_s3_policy" {
-  policy_arn = aws_iam_policy.backup_s3_policy.arn
-  role       = aws_iam_role.instance_role.name
-}
-
 resource "aws_iam_instance_profile" "ols_instance_profile" {
   name = "wp_webserver_instance_profile"
   role = aws_iam_role.instance_role.name
@@ -63,3 +30,66 @@ resource "aws_iam_instance_profile" "ols_instance_profile" {
   }
 }
 
+
+# --- Bootstrap permissions -------------------------------------------------
+
+# Session Manager, so a private instance can be reached without SSH keys.
+resource "aws_iam_role_policy_attachment" "ssm_core" {
+  role       = aws_iam_role.instance_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_policy" "bootstrap" {
+  name        = "WebsitesInstanceBootstrapPolicy"
+  description = "Read the database and WebAdmin credentials needed at instance boot"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "ReadDatabaseMasterSecret"
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
+        Resource = [aws_db_instance.websites.master_user_secret[0].secret_arn]
+      },
+      {
+        Sid      = "ReadRenderedServerConfig"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = ["${aws_s3_bucket.config.arn}/ols/*"]
+      },
+      {
+        Sid      = "ReadWebAdminPassword"
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter"]
+        Resource = [aws_ssm_parameter.ols_admin_password.arn]
+      },
+      {
+        # Both values above are encrypted with AWS managed keys. The condition
+        # keeps this from becoming a general decrypt grant.
+        Sid      = "DecryptThoseTwoOnly"
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt"]
+        Resource = ["*"]
+        Condition = {
+          StringEquals = {
+            "kms:ViaService" = [
+              "secretsmanager.${var.region}.amazonaws.com",
+              "ssm.${var.region}.amazonaws.com",
+            ]
+          }
+        }
+      },
+    ]
+  })
+
+  tags = {
+    Name       = "WebsitesInstanceBootstrapPolicy"
+    CostCenter = "Bugfloyd/Websites/Instance"
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "bootstrap" {
+  policy_arn = aws_iam_policy.bootstrap.arn
+  role       = aws_iam_role.instance_role.name
+}

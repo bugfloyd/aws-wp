@@ -5,20 +5,13 @@ resource "aws_security_group" "load_balancer_sg" {
 
   # Inbound rules
   ingress {
-    description = "Allow HTTPS from CloudFront"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
+    description     = "Allow HTTPS from CloudFront"
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
     prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
-  ingress {
-    description = "Allow TCP 7080 from a specific IP"
-    from_port   = 7080
-    to_port     = 7080
-    protocol    = "tcp"
-    cidr_blocks = var.admin_ips
-  }
 
   # Outbound rules (Allow all traffic)
   egress {

@@ -12,40 +12,62 @@ you are reading — `main` is always the newest stage and will not match earlier
 
 | Stage | Tag | What it adds | Rough cost | Post |
 | ----- | --- | ------------ | ---------- | ---- |
-| Minimal | [`v1-minimal`](../../tree/v1-minimal) | One EC2 instance in a public subnet, Route 53 A-records straight to its IP, LiteSpeed Marketplace AMI. No load balancer, no CDN. | ~$25/mo | [Beginners Guide: The Most Minimal & Cost-Effective Setup](https://bugfloyd.com/beginners-guide-minimal-wordpress-hosting-aws-terraform-openlitespeed) |
-| Scalable | _in progress on `main`_ | CloudFront, ALB, auto-scaling group in private subnets, NAT gateway, EC2 Instance Connect endpoint. Shared storage (EFS) and a managed database (RDS) to make the instances stateless. | ~$115/mo | _planned_ |
-| Reference | _planned_ | Aurora with a read replica, ElastiCache for Memcached, W3 Total Cache, S3 origin for static assets, NAT gateway per AZ. | — | _planned_ |
+| Minimal | [`v1-minimal`](../../tree/v1-minimal) | One EC2 instance in a public subnet, Route 53 A-records straight to its IP. No load balancer, no CDN, nothing shared. | ~$25/mo | [Beginners Guide: The Most Minimal & Cost-Effective Setup](https://bugfloyd.com/beginners-guide-minimal-wordpress-hosting-aws-terraform-openlitespeed) |
+| Stateless | [`v2-stateless`](../../tree/v2-stateless) | EFS for the document root, RDS for the database, and instances that configure themselves at boot. The Auto Scaling group becomes real: any instance can be replaced without losing anything. | ~$117/mo | _in progress_ |
+| Resilient | _planned_ | Removes the single points of failure: Auto Scaling group across both AZs, a NAT gateway per AZ, and RDS Multi-AZ. | ~$164/mo | _planned_ |
+| Cached | _planned_ | ElastiCache plus the LiteSpeed Cache plugin, and an S3 origin for static assets. | ~$187/mo | _planned_ |
+| Reference | _planned_ | Aurora with a read replica and a CloudWatch dashboard, completing the AWS reference architecture. | ~$256/mo | _planned_ |
 
 > [!NOTE]
-> `main` is mid-stage and **not deployable as-is**. The auto-scaling group launches instances
-> that each run their own local MariaDB and their own copy of `/var/www`, so more than one
-> instance serves inconsistent content. EFS and RDS are the work in progress that fixes this.
-> For a setup you can deploy today, use [`v1-minimal`](../../tree/v1-minimal).
+> **`v2-stateless` is deliberately single-AZ.** The web tier, the database and the NAT
+> gateway all live in one Availability Zone. Spreading the instances across two while the
+> database and the egress path stayed in one would look like redundancy without being it —
+> losing that zone takes the site down either way. The Resilient stage makes all three
+> multi-AZ together.
 
 ## Layout
 
 | Directory | Description |
 | --------- | ----------- |
 | [`hostedzones/`](hostedzones/) | Route 53 hosted zones. Deployed separately so domain records outlive the infrastructure. |
-| [`infra/`](infra/) | Networking, compute, load balancing, CloudFront, ACM and backups. |
+| [`infra/`](infra/) | Networking, compute, storage, database, load balancing, CloudFront, ACM and backups. |
 
 Both use an S3 backend with native state locking (`use_lockfile`), configured through a
 `backend_config.hcl` that is not committed.
 
+## How an instance configures itself
+
+The AMI is a bare OpenLiteSpeed install — no virtual host, no domain mapping, no WordPress.
+Everything that makes an instance serve a site happens at first boot:
+
+1. Mount EFS at `/var/www`
+2. Read the database credentials from Secrets Manager and the WebAdmin password from
+   Parameter Store
+3. Fetch the rendered OpenLiteSpeed configuration from S3 and install it
+4. Under a lock held on shared storage, create the database and install WordPress for any
+   domain that does not have it yet
+5. Start OpenLiteSpeed
+
+Because every instance does this identically, instances are interchangeable. Configuration
+changes go through a new launch template version and a rolling refresh rather than through
+a console — including changes to the OpenLiteSpeed config, whose content hash is stamped
+into the launch template for exactly that reason.
+
 ## Related projects
 
-- [bugfloyd/aws-ols-mariadb-ami](https://github.com/bugfloyd/aws-ols-mariadb-ami) — Packer +
-  Ansible build for the OpenLiteSpeed / MariaDB AMI this project launches from the Scalable
-  stage onward. Set its output as `ols_image_id`.
-- [bugfloyd/ols-wp-backup](https://github.com/bugfloyd/ols-wp-backup) — the server-level
-  backup and restore scripts baked into that AMI. `infra/configure-backups.sh` supplies their
-  configuration through instance user data at boot.
+- [bugfloyd/aws-ols-mariadb-ami](https://github.com/bugfloyd/aws-ols-mariadb-ami) — Packer
+  and Ansible build for the AMI. Build it with `-var profile=web` for this project; the
+  `standalone` profile builds the self-contained image the AMI blog post describes.
+- [bugfloyd/ols-wp-backup](https://github.com/bugfloyd/ols-wp-backup) — server-level backup
+  scripts, used by the `standalone` AMI profile. From the Stateless stage onward backups are
+  handled by RDS automated backups and AWS Backup instead.
 
 ## Prerequisites
 
 - An AWS account and the AWS CLI configured
 - [Terraform](https://developer.hashicorp.com/terraform/downloads) >= 1.10
-- A registered domain you can point at Route 53
+- A registered domain delegated to Route 53
+- An AMI built from `aws-ols-mariadb-ami` with `profile=web`
 
 ## Deploying
 
@@ -72,8 +94,8 @@ terraform apply
 terraform output hosted_zone_name_servers
 ```
 
-Then deploy the main infrastructure, passing the hosted zone IDs from the previous step into
-`domains` in `infra/terraform.tfvars`:
+Then fill in `infra/terraform.tfvars` — the hosted zone IDs from the previous step, your AMI
+id, and globally unique names for the two S3 buckets — and deploy:
 
 ```sh
 cd ../infra
@@ -82,3 +104,21 @@ terraform apply
 ```
 
 To tear everything down, `terraform destroy` in `infra/` first, then `hostedzones/`.
+
+## Reaching a private instance
+
+Nothing is publicly reachable: the instances have no public IPs, there is no bastion, and
+the load balancer only serves the site. Use the EC2 Instance Connect endpoint:
+
+```sh
+# a shell
+aws ec2-instance-connect ssh --instance-id i-xxxx --connection-type eice
+
+# the OpenLiteSpeed console, which listens on the loopback interface only
+aws ec2-instance-connect open-tunnel --instance-id i-xxxx --remote-port 22 --local-port 2222 &
+ssh -N -L 7080:127.0.0.1:7080 -p 2222 ubuntu@localhost
+# then https://localhost:7080
+```
+
+The WebAdmin password is in Parameter Store at `/websites/ols/admin-password`. Note that
+anything changed through that console is lost at the next instance refresh.

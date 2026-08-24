@@ -8,31 +8,6 @@ resource "aws_key_pair" "websites_key_pair" {
   }
 }
 
-# resource "aws_instance" "webserver" {
-#   ami                  = var.ols_image_id
-#   instance_type        = "t3.small"
-#   key_name             = aws_key_pair.websites_key_pair.key_name
-#   iam_instance_profile = aws_iam_instance_profile.ols_instance_profile.name
-#
-#   network_interface {
-#     network_interface_id = aws_network_interface.webserver.id
-#     device_index         = 0
-#   }
-#
-#   root_block_device {
-#     volume_size = 20
-#   }
-#
-#   user_data = base64encode(templatefile("${path.module}/configure-backups.sh", {
-#     backup_config_content = local.backup_config
-#   }))
-#
-#   tags = {
-#     Name       = "WebserverInstance"
-#     CostCenter = "Bugfloyd/Websites/Instance"
-#   }
-# }
-
 # Launch Template
 resource "aws_launch_template" "wordpress" {
   name_prefix   = "wordpress-"
@@ -49,16 +24,14 @@ resource "aws_launch_template" "wordpress" {
   block_device_mappings {
     device_name = "/dev/xvda"
     ebs {
-      volume_size = 20
-      volume_type = "gp3"
-      encrypted   = true
+      volume_size           = 20
+      volume_type           = "gp3"
+      encrypted             = true
       delete_on_termination = true
     }
   }
 
-  user_data = base64encode(templatefile("${path.module}/configure-backups.sh", {
-    backup_config_content = local.backup_config
-  }))
+  user_data = base64encode(local.bootstrap)
 
 
   tag_specifications {
@@ -77,14 +50,19 @@ resource "aws_launch_template" "wordpress" {
 
 # Auto Scaling Group
 resource "aws_autoscaling_group" "wordpress" {
-  name                = "wordpress-asg"
-  vpc_zone_identifier = [aws_subnet.private_a.id, aws_subnet.private_b.id]
-  target_group_arns   = [
-    aws_lb_target_group.lb_target_group_websites.arn,
-    aws_lb_target_group.lb_target_group_ols_admin.arn
-  ]
-  health_check_type         = "ELB"
-  health_check_grace_period = 300
+  name = "wordpress-asg"
+  # Single AZ for the Stateless stage. Spreading the web tier across two zones
+  # while the database and the NAT gateway both sit in one would be theatre:
+  # losing that zone takes the site down regardless of where the instances are.
+  # The Resilient stage widens this to both private subnets at the same time as
+  # it makes the database and egress path multi-AZ.
+  vpc_zone_identifier = [aws_subnet.private_a.id]
+  target_group_arns   = [aws_lb_target_group.lb_target_group_websites.arn]
+  health_check_type   = "ELB"
+  # Generous: a cold instance mounts EFS, may install WordPress, and restarts
+  # OpenLiteSpeed before it can serve anything. Too short and the group kills
+  # instances mid-provision, which never resolves on its own.
+  health_check_grace_period = 600
 
   min_size         = 2
   max_size         = 6
