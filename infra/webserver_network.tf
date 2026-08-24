@@ -11,7 +11,7 @@ resource "aws_network_interface" "webserver" {
 # Security Group for EC2 Instance
 resource "aws_security_group" "ec2_web" {
   name        = "WebsitesInstanceSecurityGroupWeb"
-  description = "Security Group for WordPress EC2 to allow HTTP from CloudFront only"
+  description = "Security Group for the WordPress EC2 instance"
   vpc_id      = aws_vpc.bugfloyd.id
 
   ingress {
