@@ -36,6 +36,17 @@ you are reading — `main` is always the newest stage and will not match earlier
 Both use an S3 backend with native state locking (`use_lockfile`), configured through a
 `backend_config.hcl` that is not committed.
 
+## Shape
+
+One `t3.micro` in a public subnet with an **Elastic IP**, CloudFront and ACM in front. No
+load balancer, no NAT gateway, no Auto Scaling group — the instance reaches the internet
+through the internet gateway directly, and a security group locked to CloudFront's managed
+prefix list is what keeps it unreachable to everyone else.
+
+The Elastic IP is not cosmetic: CloudFront needs an origin hostname that survives the
+instance being replaced, and without one the rebuild this stage makes possible would
+silently point every distribution at nothing.
+
 ## Sizing
 
 One `t3.micro` — 2 vCPU, 1 GiB. With `php_children = 15` a running instance sits around
