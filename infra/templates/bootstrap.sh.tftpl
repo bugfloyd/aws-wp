@@ -161,10 +161,16 @@ $SALTS
 
 \$table_prefix = 'wp_';
 
-/* Behind a load balancer that terminates TLS. Without this WordPress builds
-   http:// URLs and redirect loops. */
-if ( isset( \$_SERVER['HTTP_X_FORWARDED_PROTO'] ) && \$_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https' ) {
-    \$_SERVER['HTTPS'] = 'on';
+/* TLS is terminated upstream and the origin is reached over plain HTTP, so PHP
+   sees an insecure request while WordPress knows its site URL is https - which
+   is an infinite redirect on any page that enforces the canonical scheme, such
+   as wp-admin. CloudFront sends CloudFront-Forwarded-Proto; an Application Load
+   Balancer sends X-Forwarded-Proto. Honour both. */
+foreach ( array( 'HTTP_CLOUDFRONT_FORWARDED_PROTO', 'HTTP_X_FORWARDED_PROTO' ) as \$header ) {
+    if ( isset( \$_SERVER[ \$header ] ) && \$_SERVER[ \$header ] === 'https' ) {
+        \$_SERVER['HTTPS'] = 'on';
+        break;
+    }
 }
 
 /* Several instances serve this site. WordPress fires wp-cron.php via loopback

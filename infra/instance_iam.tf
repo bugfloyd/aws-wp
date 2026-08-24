@@ -53,10 +53,13 @@ resource "aws_iam_policy" "bootstrap" {
         Resource = [aws_db_instance.websites.master_user_secret[0].secret_arn]
       },
       {
-        Sid      = "ReadRenderedServerConfig"
+        # The whole bucket, not just the config prefix: it holds only this
+        # stack's own artefacts, and a migration needs somewhere to stage a
+        # site archive and a database dump the instance can pull.
+        Sid      = "ReadStackArtefacts"
         Effect   = "Allow"
-        Action   = ["s3:GetObject"]
-        Resource = ["${aws_s3_bucket.config.arn}/ols/*"]
+        Action   = ["s3:GetObject", "s3:ListBucket"]
+        Resource = [aws_s3_bucket.config.arn, "${aws_s3_bucket.config.arn}/*"]
       },
       {
         Sid      = "ReadWebAdminPassword"

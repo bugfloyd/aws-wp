@@ -32,6 +32,11 @@ resource "aws_route53_record" "cert_validation" {
   type    = each.value.type
   records = [each.value.record]
   ttl     = 60
+
+  # A second certificate for a domain already certified in this account gets the
+  # same validation record name and value. Without this, standing a replacement
+  # stack alongside the current one fails with "record set already exists".
+  allow_overwrite = true
 }
 
 resource "aws_acm_certificate_validation" "cert_validation" {
