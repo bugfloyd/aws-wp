@@ -76,7 +76,7 @@ variable "db_skip_final_snapshot" {
 variable "php_children" {
   description = "Ceiling on LSPHP worker processes for the whole server. Children are forked on demand, so idle sites cost nothing - but the ceiling must fit in instance memory at roughly 40-60 MB each, because a burst can reach it. 12 leaves headroom on a 1 GiB instance"
   type        = number
-  default     = 12
+  default     = 15
 }
 
 variable "instance_type" {
