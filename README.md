@@ -24,6 +24,11 @@ you are reading — `main` is always the newest stage and will not match earlier
 > database and the egress path stayed in one would look like redundancy without being it —
 > losing that zone takes the site down either way. The Resilient stage makes all three
 > multi-AZ together.
+>
+> It still runs two instances, because the benefit there is instance-level rather than
+> zone-level: EC2 hosts fail and get retired individually, and every configuration change
+> goes out as a new image and a rolling refresh, which is seamless with two and an outage
+> with one.
 
 ## Layout
 
@@ -34,6 +39,19 @@ you are reading — `main` is always the newest stage and will not match earlier
 
 Both use an S3 backend with native state locking (`use_lockfile`), configured through a
 `backend_config.hcl` that is not committed.
+
+## Scaling
+
+The Auto Scaling group runs **2 `t3.small` instances** in one Availability Zone, with a
+ceiling of 6. It scales on CPU: out at 75%, in at 25%, each over two five-minute periods
+with a five-minute cooldown. Health is judged by the load balancer, with a ten-minute grace
+period so a cold instance can mount storage and install WordPress before it is assessed.
+
+Two caveats worth knowing before you rely on it. **CPU is a weak signal for WordPress**,
+which usually saturates on the database or on IO while CPU stays unremarkable — target
+tracking on `RequestCountPerTarget` measures what actually degrades. And **the end-to-end
+reaction is around fifteen minutes** once evaluation periods, cooldown and boot time are
+added up, so this handles sustained load rather than spikes.
 
 ## How an instance configures itself
 
@@ -95,7 +113,8 @@ terraform output hosted_zone_name_servers
 ```
 
 Then fill in `infra/terraform.tfvars` — the hosted zone IDs from the previous step, your AMI
-id, and globally unique names for the two S3 buckets — and deploy:
+id, globally unique names for the two S3 buckets, and the address alarms should notify — and
+deploy:
 
 ```sh
 cd ../infra
@@ -122,3 +141,17 @@ ssh -N -L 7080:127.0.0.1:7080 -p 2222 ubuntu@localhost
 
 The WebAdmin password is in Parameter Store at `/websites/ols/admin-password`. Note that
 anything changed through that console is lost at the next instance refresh.
+
+The instances also register with Systems Manager, so `aws ssm start-session` works, and
+`aws ssm send-command` can query or act on the whole group at once — which SSH cannot.
+
+## Alerting
+
+CloudWatch alarms cover EFS burst credits, EFS IO limit, RDS free storage, and unhealthy
+load balancer targets. They publish to an SNS topic with an email subscription set by
+`alert_email`.
+
+> [!IMPORTANT]
+> AWS emails a confirmation link when the subscription is created, and Terraform cannot
+> accept it for you. Until you click it the subscription stays in `PendingConfirmation` and
+> **no alarm reaches anyone** — without failing the apply or showing an error.
