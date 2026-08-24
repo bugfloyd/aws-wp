@@ -18,9 +18,15 @@ resource "aws_s3_bucket_ownership_controls" "ownership_controls" {
 
 # Set ACL for LogDeliveryWrite
 resource "aws_s3_bucket_acl" "logging_bucket_acl" {
-  bucket     = aws_s3_bucket.cloudfront_logging_bucket.id
-  acl        = "log-delivery-write"
-  depends_on = [aws_s3_bucket.cloudfront_logging_bucket]
+  bucket = aws_s3_bucket.cloudfront_logging_bucket.id
+  acl    = "log-delivery-write"
+
+  # Must wait for the ownership controls, not merely for the bucket. Since
+  # April 2023 new buckets default to BucketOwnerEnforced, which rejects ACLs
+  # outright, so racing ahead of the controls fails with
+  # AccessControlListNotSupported. CloudFront's standard logging still needs
+  # the log-delivery ACL, hence BucketOwnerPreferred.
+  depends_on = [aws_s3_bucket_ownership_controls.ownership_controls]
 }
 
 # Disable Bucket Versioning

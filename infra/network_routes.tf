@@ -54,3 +54,26 @@ resource "aws_route_table_association" "private_subnet_b_association" {
   subnet_id      = aws_subnet.private_b.id
   route_table_id = aws_route_table.private_route_table.id
 }
+
+
+# Data
+# Deliberately no default route. RDS, EFS and (later) ElastiCache need only
+# local VPC routing, so the data tier has no path to the internet at all.
+resource "aws_route_table" "data_route_table" {
+  vpc_id = aws_vpc.bugfloyd.id
+
+  tags = {
+    Name       = "BugfloydDataRouteTable"
+    CostCenter = "Bugfloyd/Network"
+  }
+}
+
+resource "aws_route_table_association" "data_subnet_a_association" {
+  subnet_id      = aws_subnet.data_a.id
+  route_table_id = aws_route_table.data_route_table.id
+}
+
+resource "aws_route_table_association" "data_subnet_b_association" {
+  subnet_id      = aws_subnet.data_b.id
+  route_table_id = aws_route_table.data_route_table.id
+}

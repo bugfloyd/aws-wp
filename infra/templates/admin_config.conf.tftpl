@@ -1,0 +1,35 @@
+# OpenLiteSpeed WebAdmin.
+#
+# Bound to the loopback interface only. The console cannot persist a change
+# anyway - every instance is rebuilt from the launch template - so it exists
+# purely to inspect live state. Reaching it means an SSH local port-forward
+# over the EC2 Instance Connect Endpoint, which is IAM gated.
+#
+# Keep to directives OpenLiteSpeed actually accepts here: anything it does not
+# recognise is a fatal configuration error, and the server refuses to start.
+enableCoreDump            1
+sessionTimeout            3600
+
+errorlog $SERVER_ROOT/admin/logs/error.log {
+  useServer               0
+  logLevel                INFO
+  rollingSize             10M
+}
+
+accesslog $SERVER_ROOT/admin/logs/access.log {
+  useServer               0
+  rollingSize             10M
+  keepDays                90
+}
+
+accessControl  {
+  allow                   ALL
+}
+
+listener adminListener {
+  address                 127.0.0.1:7080
+  secure                  1
+  keyFile                 $SERVER_ROOT/admin/conf/webadmin.key
+  certFile                $SERVER_ROOT/admin/conf/webadmin.crt
+  clientVerify            0
+}
