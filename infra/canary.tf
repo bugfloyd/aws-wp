@@ -10,6 +10,14 @@
 
 locals {
   canary_domains = join(",", keys(var.domains))
+
+  # The alarm's period has to match how often the canary actually runs. Leave
+  # it hardcoded and a schedule change silently breaks the alarm: with a
+  # five-minute period and an hourly canary, eleven windows out of twelve hold
+  # no data at all, and treat_missing_data = "breaching" turns that into a
+  # permanent alarm. Derive it so the two cannot drift apart.
+  canary_rate           = regex("^rate\\((\\d+) (minute|minutes|hour|hours)\\)$", var.canary_schedule_expression)
+  canary_period_seconds = tonumber(local.canary_rate[0]) * (startswith(local.canary_rate[1], "hour") ? 3600 : 60)
 }
 
 data "archive_file" "canary" {
@@ -65,10 +73,14 @@ resource "aws_cloudwatch_metric_alarm" "canary_failed" {
   namespace   = "CloudWatchSynthetics"
   metric_name = "SuccessPercent"
   statistic   = "Average"
-  period      = 300
+  period      = local.canary_period_seconds
 
-  # Two consecutive failures, so a single timeout does not page anyone.
-  evaluation_periods  = 2
+  # One failed run is enough. Waiting for a second confirmation is the usual
+  # way to suppress a single flaky check, but it costs one whole interval - at
+  # an hourly cadence that is two hours before anyone hears, which is longer
+  # than most outages worth hearing about. An occasional false email is the
+  # cheaper mistake here.
+  evaluation_periods  = 1
   comparison_operator = "LessThanThreshold"
   threshold           = 100
 

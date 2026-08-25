@@ -123,9 +123,14 @@ variable "enable_canary" {
 }
 
 variable "canary_schedule_expression" {
-  description = "How often the canary runs. Runs are billed individually - at $0.0014 each, every 5 minutes is about $12/month and every 15 minutes about $4, against a stack that otherwise costs roughly $33"
+  description = "How often the canary runs, as rate(N minutes) or rate(N hours). Runs are billed individually at $0.0014 each: hourly is about $1/month, every 15 minutes about $4, every 5 minutes about $12. The alarm period is derived from this, so the two cannot drift apart"
   type        = string
-  default     = "rate(15 minutes)"
+  default     = "rate(1 hour)"
+
+  validation {
+    condition     = can(regex("^rate\\((\\d+) (minute|minutes|hour|hours)\\)$", var.canary_schedule_expression))
+    error_message = "Must be rate(N minutes) or rate(N hours) - the alarm period is derived from it by parsing."
+  }
 }
 
 variable "canary_runtime_version" {

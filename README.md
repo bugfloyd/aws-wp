@@ -248,14 +248,24 @@ stops reporting is itself an alert.
 
 Canary runs are billed individually, at $0.0014 each:
 
-| `canary_schedule_expression` | Runs/month | Cost |
-| ---------------------------- | ---------- | ---- |
-| `rate(5 minutes)` | 8,640 | ~$12.10 |
-| `rate(15 minutes)` (default) | 2,880 | ~$4.03 |
-| `rate(1 hour)` | 730 | ~$1.02 |
+| `canary_schedule_expression` | Runs/month | Cost | Worst-case time to alert |
+| ---------------------------- | ---------- | ---- | ----------------------- |
+| `rate(5 minutes)` | 8,640 | ~$12.10 | ~5 min |
+| `rate(15 minutes)` | 2,880 | ~$4.03 | ~15 min |
+| `rate(1 hour)` (default) | 730 | ~$1.02 | ~1 hour |
 
-Five minutes would add a third to the cost of the whole stack, which is the wrong trade for
-sites this quiet. Set `enable_canary = false` to drop it entirely.
+Hourly is the default because five-minute checks would add a third to the cost of the whole
+stack, which is the wrong trade for sites this quiet. What you give up is resolution: an
+outage shorter than an hour can fall entirely between two runs and never be recorded, so the
+canary will not measure brief things like a deploy. It is there to catch a site that is
+broken and staying broken.
+
+**The alarm's period is derived from this expression, not set separately.** With a
+five-minute period and an hourly canary, eleven windows in twelve contain no data, and
+because missing data counts as breaching, the alarm would sit permanently in ALARM. Changing
+the schedule alone would quietly break the alerting it exists to drive.
+
+Set `enable_canary = false` to drop it entirely.
 
 > [!IMPORTANT]
 > AWS emails a confirmation link when the subscription is created, and Terraform cannot
