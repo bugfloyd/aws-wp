@@ -36,6 +36,7 @@ module "websites_cert_cloudfront_dns" {
   # still reach the origin. Disabling the cache would send every request to a
   # single small instance, which is the opposite of the point.
   disable_cache = false
+  policy_suffix = var.edge_policy_suffix
 
   providers = {
     aws.us_east_1 = aws.us_east_1

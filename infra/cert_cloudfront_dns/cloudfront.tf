@@ -68,7 +68,7 @@ resource "aws_cloudfront_distribution" "cloudfront" {
 }
 
 resource "aws_cloudfront_cache_policy" "cache_policy" {
-  name = "${replace(var.domain, ".", "_")}-cache-policy"
+  name = "${replace(var.domain, ".", "_")}-cache-policy${var.policy_suffix}"
 
   default_ttl = 86400
   max_ttl     = 31536000
@@ -96,7 +96,7 @@ resource "aws_cloudfront_cache_policy" "cache_policy" {
 }
 
 resource "aws_cloudfront_origin_request_policy" "origin_request_policy" {
-  name = "${replace(var.domain, ".", "_")}-origin-policy"
+  name = "${replace(var.domain, ".", "_")}-origin-policy${var.policy_suffix}"
 
   cookies_config {
     cookie_behavior = "all"
@@ -147,6 +147,10 @@ resource "aws_route53_record" "main_dns_record" {
     zone_id                = "Z2FDTNDATAQYW2" # CloudFront's Hosted Zone ID
     evaluate_target_health = false
   }
+
+  # A cutover repoints an existing alias record at a different distribution.
+  # Without this the apply fails because the record already exists.
+  allow_overwrite = true
 }
 
 resource "aws_route53_record" "www_dns_record" {
@@ -159,5 +163,9 @@ resource "aws_route53_record" "www_dns_record" {
     zone_id                = "Z2FDTNDATAQYW2" # CloudFront's Hosted Zone ID
     evaluate_target_health = false
   }
+
+  # A cutover repoints an existing alias record at a different distribution.
+  # Without this the apply fails because the record already exists.
+  allow_overwrite = true
 }
 

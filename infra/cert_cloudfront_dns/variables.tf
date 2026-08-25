@@ -29,3 +29,9 @@ variable "origin_http_port" {
   type        = number
   default     = 80
 }
+
+variable "policy_suffix" {
+  description = "Appended to CloudFront cache and origin request policy names. These are unique account-wide, so a replacement stack running alongside an existing one needs its own"
+  type        = string
+  default     = ""
+}

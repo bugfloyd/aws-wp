@@ -113,3 +113,9 @@ variable "key_pair_name" {
   type        = string
   default     = "WebsitesKeyPair"
 }
+
+variable "edge_policy_suffix" {
+  description = "Suffix for CloudFront policy names, which are unique account-wide"
+  type        = string
+  default     = ""
+}
