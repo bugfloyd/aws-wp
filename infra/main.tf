@@ -37,7 +37,10 @@ module "websites_cert_cloudfront_dns" {
   # single small instance, which is the opposite of the point.
   disable_cache       = false
   origin_read_timeout = var.origin_read_timeout
-  policy_suffix       = var.edge_policy_suffix
+
+  media_bucket_regional_domain_name = aws_s3_bucket.media[each.key].bucket_regional_domain_name
+  media_oac_id                      = aws_cloudfront_origin_access_control.media.id
+  policy_suffix                     = var.edge_policy_suffix
 
   providers = {
     aws.us_east_1 = aws.us_east_1

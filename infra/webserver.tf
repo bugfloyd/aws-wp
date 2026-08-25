@@ -33,7 +33,14 @@ resource "aws_instance" "webserver" {
     delete_on_termination = true
   }
 
-  user_data = local.bootstrap
+  # Compressed, because EC2 caps user data at 16 KB and the script passed it.
+  #
+  # cloud-init sniffs the gzip magic bytes and decompresses before running, so
+  # this costs nothing at boot. The script is mostly comments explaining why each
+  # step exists, which is the point of it - trimming those to fit would be
+  # deleting the documentation to make room for the code. 17 KB becomes about
+  # 6.6, which leaves room to keep explaining things.
+  user_data_base64 = base64gzip(local.bootstrap)
 
   # Rebuild the instance when the bootstrap changes, rather than leaving a
   # running box configured by a script it no longer matches. This is what keeps

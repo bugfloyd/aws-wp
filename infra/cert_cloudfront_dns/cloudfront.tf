@@ -37,6 +37,41 @@ resource "aws_cloudfront_distribution" "cloudfront" {
     }
   }
 
+  # The media bucket, and the group that prefers it.
+  #
+  # The instance is the fallback, not a peer: the file system is still the
+  # source of truth and the mirror runs on a timer, so an upload made in the
+  # last few minutes may not be here yet.
+  origin {
+    domain_name              = var.media_bucket_regional_domain_name
+    origin_id                = "MediaOrigin"
+    origin_access_control_id = var.media_oac_id
+
+    # No custom_origin_config: an S3 origin with OAC is a native origin and
+    # CloudFront signs the request.
+  }
+
+  origin_group {
+    origin_id = "MediaGroup"
+
+    # 403, not 404. The bucket policy grants s3:GetObject and not
+    # s3:ListBucket, so S3 refuses to say whether a missing key exists and
+    # answers AccessDenied. A criteria list of [404] reads perfectly sensibly
+    # and never fails over at all - verified by removing 403 and watching an
+    # unsynced object return AccessDenied instead of the instance's copy.
+    failover_criteria {
+      status_codes = [403, 404, 500, 502, 503, 504]
+    }
+
+    member {
+      origin_id = "MediaOrigin"
+    }
+
+    member {
+      origin_id = "EC2Origin"
+    }
+  }
+
   default_cache_behavior {
     target_origin_id       = "EC2Origin"
     viewer_protocol_policy = "redirect-to-https"
@@ -48,6 +83,23 @@ resource "aws_cloudfront_distribution" "cloudfront" {
     origin_request_policy_id = aws_cloudfront_origin_request_policy.origin_request_policy.id
 
     compress = true
+  }
+
+  # Uploads come from the bucket when it has them, and from the instance when it
+  # does not. Everything else - PHP, admin, generated CSS under
+  # wp-content/uploads that the mirror deliberately does not cover - falls
+  # through to the default behavior and the instance.
+  ordered_cache_behavior {
+    path_pattern           = "/wp-content/uploads/*"
+    target_origin_id       = "MediaGroup"
+    viewer_protocol_policy = "redirect-to-https"
+    allowed_methods        = ["GET", "HEAD"]
+    cached_methods         = ["GET", "HEAD"]
+    compress               = true
+
+    # Media is immutable in practice: WordPress writes a new filename rather
+    # than editing one in place. CachingOptimized is the managed policy for it.
+    cache_policy_id = "658327ea-f89d-4fab-a63d-7e88639e58f6"
   }
 
   viewer_certificate {

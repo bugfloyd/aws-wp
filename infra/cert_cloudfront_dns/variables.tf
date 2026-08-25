@@ -41,3 +41,13 @@ variable "origin_read_timeout" {
   type        = number
   default     = 120
 }
+
+variable "media_bucket_regional_domain_name" {
+  description = "Regional domain name of this site's media bucket, used as the preferred origin for /wp-content/uploads/*"
+  type        = string
+}
+
+variable "media_oac_id" {
+  description = "Origin Access Control that lets this distribution read the media bucket"
+  type        = string
+}

@@ -45,7 +45,7 @@ locals {
 
   bootstrap = templatefile("${path.module}/templates/bootstrap.sh.tftpl", {
     region          = var.region
-    efs_dns         = "${aws_efs_file_system.websites.id}.efs.${var.region}.amazonaws.com"
+    fsx_dns         = aws_fsx_openzfs_file_system.websites.dns_name
     db_secret_arn   = aws_db_instance.websites.master_user_secret[0].secret_arn
     db_host         = aws_db_instance.websites.address
     ols_admin_param = aws_ssm_parameter.ols_admin_password.name
@@ -53,6 +53,11 @@ locals {
     domain_list     = join(" ", [for d in local.domains_list : "\"${d}\""])
     config_bucket   = aws_s3_bucket.config.id
     php_settings    = var.php_settings
+
+    # Only the mirrored sites, so a domain with the edge disabled does not get a
+    # sync target it has no bucket policy for.
+    media_buckets       = local.media_bucket_names
+    media_sync_interval = var.media_sync_interval
     # Stamped in so a config change produces a new launch template version and
     # therefore a rolling refresh, rather than silently drifting.
     config_revision = md5(join("", [local.httpd_config, local.vhost_config, local.admin_config]))

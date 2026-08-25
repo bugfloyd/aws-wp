@@ -3,15 +3,15 @@
 # Runs on every instance launch. Must be idempotent: instances are replaced
 # constantly, and several may boot at once during a scale-out.
 #
-# Order matters. EFS has to be mounted before OpenLiteSpeed starts, because the
-# document root lives on it.
+# Order matters. Shared storage has to be mounted before OpenLiteSpeed starts,
+# because the document root lives on it.
 
 set -euo pipefail
 exec > >(tee -a /var/log/wp-bootstrap.log) 2>&1
 echo "=== wp-bootstrap starting $(date -Is) ==="
 
 REGION="${region}"
-EFS_DNS="${efs_dns}"
+FSX_DNS="${fsx_dns}"
 DB_SECRET_ARN="${db_secret_arn}"
 DB_HOST="${db_host}"
 OLS_ADMIN_PARAM="${ols_admin_param}"
@@ -57,23 +57,33 @@ echo "vm.swappiness=10" > /etc/sysctl.d/99-swappiness.conf
 # ---------------------------------------------------------------------------
 mkdir -p /var/www
 
-if ! grep -q "$EFS_DNS" /etc/fstab; then
-  echo "$EFS_DNS:/ /var/www nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport,_netdev 0 0" >> /etc/fstab
+# FSx for OpenZFS exports the root volume at /fsx, not at /. NFS 4.2 is what
+# AWS documents for it; 4.1 also works but 4.2 is the tested path.
+#
+# Deliberately no "noresvport", which EFS documentation recommends and which
+# breaks this outright. FSx exports default to the "secure" option, meaning the
+# client must connect from a privileged source port; noresvport asks for the
+# opposite and the server answers "Operation not permitted" - an error that
+# reads like a permissions problem in the export or the security group, and is
+# neither. Mount options do not transfer between file systems just because both
+# speak NFS.
+if ! grep -q "$FSX_DNS" /etc/fstab; then
+  echo "$FSX_DNS:/fsx /var/www nfs nfsvers=4.2,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,_netdev 0 0" >> /etc/fstab
 fi
 
-# Mount targets can lag behind the instance during a cold start, so retry.
+# The file system can lag behind the instance during a cold start, so retry.
 for attempt in $(seq 1 30); do
   if mountpoint -q /var/www; then break; fi
   mount /var/www && break || true
-  echo "EFS not ready yet (attempt $attempt), retrying..."
+  echo "shared storage not ready yet (attempt $attempt), retrying..."
   sleep 10
 done
 
 if ! mountpoint -q /var/www; then
-  echo "FATAL: could not mount $EFS_DNS at /var/www"
+  echo "FATAL: could not mount $FSX_DNS:/fsx at /var/www"
   exit 1
 fi
-echo "EFS mounted at /var/www"
+echo "shared storage mounted at /var/www"
 
 # ---------------------------------------------------------------------------
 # 4. Credentials
@@ -132,7 +142,7 @@ aws s3 cp "s3://$CONFIG_BUCKET/ols/vhconf.conf" /tmp/vhconf.template --region "$
 # The image ships PHP's own defaults, which are wrong for WordPress in specific,
 # visible ways: a 2 MB upload cap rejects both a large plugin zip and an
 # ordinary phone photo, and a 30-second execution limit is under half what a big
-# plugin update needs when the files land on EFS.
+# plugin update needs when the files land on shared storage.
 PHP_SCAN_DIR="$(/usr/bin/php -i 2>/dev/null | awk -F'=> ' '/Scan this dir/ {print $2}' | tr -d ' \r')"
 if [ -n "$PHP_SCAN_DIR" ] && [ -d "$PHP_SCAN_DIR" ]; then
   {
@@ -185,7 +195,7 @@ for DOMAIN in "$${DOMAINS[@]}"; do
 
   mkdir -p "$HTML_ROOT" "$SITE_ROOT/logs"
 
-  # Per-vhost config is local to the instance, not on EFS: it is derived state,
+  # Per-vhost config is local to the instance, not on shared storage: derived state,
   # regenerated on every boot from the launch template.
   mkdir -p "/usr/local/lsws/conf/vhosts/$DOMAIN"
   cp /tmp/vhconf.template "/usr/local/lsws/conf/vhosts/$DOMAIN/vhconf.conf"
@@ -329,6 +339,75 @@ CRONTIMER
 
 systemctl daemon-reload
 systemctl enable --now wp-cron.timer
+
+# ---------------------------------------------------------------------------
+# 6c. Mirror uploads to S3 so CloudFront can serve them without the instance
+# ---------------------------------------------------------------------------
+# WordPress is untouched by this. It keeps writing to wp-content/uploads on
+# shared storage, which stays the source of truth; the bucket is a serving copy.
+# CloudFront prefers the bucket for /wp-content/uploads/* and falls back to this
+# instance for anything not mirrored yet, so the interval below is a performance
+# knob and not a window in which uploads can be lost.
+#
+# Same single-runner election as wp-cron: the lock is on shared storage and taken
+# non-blocking, so one instance syncs however many are running.
+cat > /usr/local/bin/wp-media-sync.sh <<'MEDIASYNC'
+#!/bin/bash
+set -uo pipefail
+
+exec 202>/var/www/.wp-media-sync.lock
+flock -n 202 || exit 0
+
+# Refuse to run against storage that is not mounted.
+#
+# --delete makes the bucket mirror the directory, which is what makes a deletion
+# in WordPress actually remove the file rather than leave it served from the
+# edge forever. It also means an unmounted file system presents an empty
+# directory that sync would faithfully reproduce by emptying the bucket. These
+# two guards turn that from "lose every media file" into "do nothing".
+mountpoint -q /var/www || { echo "shared storage not mounted; refusing to sync"; exit 0; }
+
+while IFS='=' read -r DOMAIN BUCKET; do
+  [ -n "$DOMAIN" ] || continue
+  UPLOADS="/var/www/$DOMAIN/html/wp-content/uploads"
+  [ -d "$UPLOADS" ] || continue
+  [ -n "$(ls -A "$UPLOADS" 2>/dev/null)" ] || continue
+
+  aws s3 sync "$UPLOADS" "s3://$BUCKET/wp-content/uploads"     --delete --only-show-errors --no-progress || true
+done < /etc/wp-media-sync.conf
+MEDIASYNC
+chmod 0755 /usr/local/bin/wp-media-sync.sh
+
+: > /etc/wp-media-sync.conf
+%{ for domain, bucket in media_buckets ~}
+echo "${domain}=${bucket}" >> /etc/wp-media-sync.conf
+%{ endfor ~}
+
+cat > /etc/systemd/system/wp-media-sync.service <<'MEDIASERVICE'
+[Unit]
+Description=Mirror WordPress uploads to S3
+After=network-online.target var-www.mount
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/wp-media-sync.sh
+MEDIASERVICE
+
+cat > /etc/systemd/system/wp-media-sync.timer <<'MEDIATIMER'
+[Unit]
+Description=Mirror WordPress uploads to S3 every ten minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=${media_sync_interval}
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
+MEDIATIMER
+
+systemctl daemon-reload
+systemctl enable --now wp-media-sync.timer
 
 # ---------------------------------------------------------------------------
 # 8. Start serving

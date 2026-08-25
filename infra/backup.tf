@@ -84,12 +84,12 @@ resource "aws_iam_role_policy_attachment" "restore" {
 }
 
 resource "aws_backup_selection" "efs" {
-  name         = "${var.stack_name}-efs"
+  name         = "${var.stack_name}-fsx"
   plan_id      = aws_backup_plan.websites.id
   iam_role_arn = aws_iam_role.backup.arn
 
   resources = [
-    aws_efs_file_system.websites.arn,
+    aws_fsx_openzfs_file_system.websites.arn,
   ]
 }
 

@@ -93,6 +93,29 @@ variable "db_skip_final_snapshot" {
   default     = true
 }
 
+variable "media_sync_interval" {
+  description = "How often uploads are mirrored to S3, as a systemd time span. CloudFront falls back to the instance for anything not yet mirrored, so this is a performance knob rather than a data-loss window"
+  type        = string
+  default     = "10min"
+}
+
+variable "fsx_storage_capacity" {
+  description = "GiB of SSD provisioned on the FSx file system. 64 is the minimum. Unlike EFS this does not grow on its own"
+  type        = number
+  default     = 64
+}
+
+variable "fsx_throughput_capacity" {
+  description = "MB/s provisioned on the FSx file system, and the larger half of its cost at $0.286/MBps-month. 64 is the SINGLE_AZ_1 minimum; the valid steps are 64, 128, 256, 512 and up"
+  type        = number
+  default     = 64
+
+  validation {
+    condition     = contains([64, 128, 256, 512, 1024, 2048, 3072, 4096], var.fsx_throughput_capacity)
+    error_message = "SINGLE_AZ_1 accepts 64, 128, 256, 512, 1024, 2048, 3072 or 4096 MB/s."
+  }
+}
+
 variable "php_settings" {
   description = "php.ini values applied at boot. The image ships PHP's own defaults, which are wrong for WordPress in visible ways - a 2 MB upload cap rejects an ordinary phone photo, and 30 seconds is under half what a large plugin update needs against EFS"
   type        = map(string)
