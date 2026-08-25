@@ -28,7 +28,32 @@ DOMAINS=(${domain_list})
 systemctl disable --now rpcbind rpcbind.socket >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------------
-# 2. Mount shared storage
+# 2. Swap
+# ---------------------------------------------------------------------------
+# Insurance against the tail, not a substitute for memory. LSPHP workers cost
+# about 26 MB each in shared pages, but PHP's memory_limit is 128 MB, so a
+# handful of simultaneously heavy requests can each grow far past the average.
+# Without swap that is an OOM kill; with it, the worst case is a slow request.
+#
+# swappiness is dropped from the default 60 so the kernel reaches for this only
+# under real pressure rather than paging out idle workers to grow the page
+# cache - on a file-heavy WordPress box the default trades latency for nothing.
+if ! swapon --show | grep -q /swapfile; then
+  fallocate -l 1G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=1024
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+fi
+
+if ! grep -q '^/swapfile' /etc/fstab; then
+  echo "/swapfile none swap sw 0 0" >> /etc/fstab
+fi
+
+sysctl -w vm.swappiness=10 >/dev/null
+echo "vm.swappiness=10" > /etc/sysctl.d/99-swappiness.conf
+
+# ---------------------------------------------------------------------------
+# 3. Mount shared storage
 # ---------------------------------------------------------------------------
 mkdir -p /var/www
 
@@ -51,7 +76,7 @@ fi
 echo "EFS mounted at /var/www"
 
 # ---------------------------------------------------------------------------
-# 3. Credentials
+# 4. Credentials
 # ---------------------------------------------------------------------------
 DB_SECRET=$(aws secretsmanager get-secret-value \
   --secret-id "$DB_SECRET_ARN" --region "$REGION" \
@@ -68,7 +93,7 @@ mysql_admin() {
 }
 
 # ---------------------------------------------------------------------------
-# 4. WebAdmin credentials
+# 5. WebAdmin credentials
 # ---------------------------------------------------------------------------
 # The image ships a bcrypt hash from the package install whose plaintext nobody
 # recorded. Replace it with a known value held in Parameter Store, so the
@@ -87,7 +112,7 @@ chown lsadm:lsadm /usr/local/lsws/admin/conf/admin_config.conf
 chmod 0644 /usr/local/lsws/admin/conf/admin_config.conf
 
 # ---------------------------------------------------------------------------
-# 5. Server configuration
+# 6. Server configuration
 # ---------------------------------------------------------------------------
 aws s3 cp "s3://$CONFIG_BUCKET/ols/httpd_config.conf" \
   /usr/local/lsws/conf/httpd_config.conf --region "$REGION" --quiet
@@ -98,7 +123,7 @@ chmod 0644 /usr/local/lsws/conf/httpd_config.conf
 aws s3 cp "s3://$CONFIG_BUCKET/ols/vhconf.conf" /tmp/vhconf.template --region "$REGION" --quiet
 
 # ---------------------------------------------------------------------------
-# 6. Per-site setup, guarded so concurrent launches cannot collide
+# 7. Per-site setup, guarded so concurrent launches cannot collide
 # ---------------------------------------------------------------------------
 exec 200>/var/www/.bootstrap.lock
 flock -w 600 200 || { echo "FATAL: timed out waiting for the bootstrap lock"; exit 1; }
@@ -128,7 +153,19 @@ for DOMAIN in "$${DOMAINS[@]}"; do
 
   if [ -e "$HTML_ROOT/wp-config.php" ]; then
     echo "WordPress already present, skipping install"
-    chown -R 33:33 "$SITE_ROOT" || true
+
+    # Do not walk the tree unless it is actually wrong. A recursive chown over
+    # NFS costs a round trip per file - minutes for a real site, on every
+    # single boot - to re-apply ownership an earlier boot already set. That is
+    # long enough that an instance replacement serves 504s while it runs.
+    #
+    # wp-config.php is the last thing written during an install, so if it is
+    # already owned correctly the rest of the tree is too.
+    if [ "$(stat -c %u:%g "$HTML_ROOT/wp-config.php" 2>/dev/null)" != "33:33" ]; then
+      echo "ownership drifted, normalising $SITE_ROOT"
+      chown -R 33:33 "$SITE_ROOT" || true
+    fi
+
     continue
   fi
 
@@ -247,7 +284,7 @@ systemctl daemon-reload
 systemctl enable --now wp-cron.timer
 
 # ---------------------------------------------------------------------------
-# 7. Start serving
+# 8. Start serving
 # ---------------------------------------------------------------------------
 mkdir -p /tmp/lshttpd
 
