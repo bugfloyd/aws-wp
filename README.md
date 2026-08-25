@@ -54,9 +54,17 @@ One `t3.micro` — 2 vCPU, 1 GiB. With `php_children = 15` a running instance si
 and worker count are both variables.
 
 **`php_children` is a ceiling, not an allocation.** LSAPI forks workers on demand, so idle
-sites cost nothing. But the ceiling has to fit in memory when a burst reaches it — roughly
-40–60 MB per worker, against about 700 MB left after the OS, OpenLiteSpeed and the SSM
-agent. Raise the instance type before raising this.
+sites cost nothing. But the ceiling has to fit in memory when a burst reaches it, and the
+number that matters is the *incremental* cost of a worker, not its RSS: workers fork from a
+common parent and share most of their pages. Measured on a live three-site box, each worker
+adds about **26 MB PSS** while showing 95 MB RSS — so sizing from `ps` overstates the cost
+by roughly a factor of three.
+
+Budget instead from the baseline: the OS, OpenLiteSpeed and the SSM agent occupy around
+450 MB, which leaves about 500 MB of a `t3.micro` for workers. What that does not cover is
+the tail — PHP's `memory_limit` is 128 MB, so a handful of simultaneously heavy requests can
+each grow far past the average, and there is no swap. Raise the instance type before raising
+this.
 
 There is no Auto Scaling group at this stage and no load balancer health check, so nothing
 watches whether the site is actually responding — an EC2 status-check alarm catches the
