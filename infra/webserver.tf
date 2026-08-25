@@ -9,7 +9,7 @@
 # first boot, so it can be destroyed and recreated without losing anything.
 
 resource "aws_key_pair" "websites_key_pair" {
-  key_name   = "WebsitesKeyPair"
+  key_name   = var.key_pair_name
   public_key = var.admin_public_key
 
   tags = {

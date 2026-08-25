@@ -107,3 +107,9 @@ variable "enable_edge" {
   type        = bool
   default     = true
 }
+
+variable "key_pair_name" {
+  description = "Name of the EC2 key pair. Key pair names are unique per region, so a replacement stack running alongside an existing one needs its own"
+  type        = string
+  default     = "WebsitesKeyPair"
+}
