@@ -129,7 +129,14 @@ HTTP, so there is no certificate on the instance and nothing to renew.
 ## Versions
 
 Terraform, the AWS provider and the managed-service engines all track the current stable
-release rather than whatever worked when this was written. For RDS that is not cosmetic:
+release rather than whatever worked when this was written. Currently: **AWS provider 6.x**,
+MySQL **8.4**, Synthetics runtime **syn-nodejs-puppeteer-17.0**.
+
+The Terraform floor stays at **1.10** deliberately — that is the release that added
+`use_lockfile`, the S3 backend's native state locking, which this project relies on instead
+of the deprecated DynamoDB table.
+
+For RDS, tracking the current version is not cosmetic:
 
 **A database left on a version past its RDS end of standard support is enrolled in Extended
 Support automatically, and billed per vCPU-hour.** Measured on this account, that is
