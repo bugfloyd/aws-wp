@@ -126,6 +126,14 @@ script it no longer matches.
 TLS is terminated at CloudFront with an ACM certificate and the origin is reached over plain
 HTTP, so there is no certificate on the instance and nothing to renew.
 
+**OPcache is what keeps EFS off the read path.** Without it every request re-reads and
+recompiles PHP source over NFS. Two settings matter more here than on local disk:
+`opcache.revalidate_freq` is raised from 2 seconds to 900, because revalidation `stat()`s
+every cached file and on NFS each one is a network round trip; and the cache is sized to hold
+the working set rather than evicting and recompiling from EFS. WordPress calls
+`opcache_invalidate()` on the files it writes during an update, so its own changes still take
+effect immediately despite the 900-second window.
+
 **EFS bills in round trips, not bytes, and that shapes what the admin panel can do.** Creating
 small files over NFS runs at roughly 130/sec here against 21,000/sec on local disk. A plugin
 update deletes the old directory and unpacks the new one file by file, so a 2,000-file plugin

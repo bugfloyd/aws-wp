@@ -104,6 +104,27 @@ variable "php_settings" {
     upload_max_filesize = "64M"
     post_max_size       = "64M"
     max_input_vars      = "3000"
+
+    # OPcache is what keeps EFS off the read path: without it every request
+    # re-reads and recompiles PHP source over NFS.
+    "opcache.enable" = "1"
+
+    # The default 10,000 does not fit the 16,400 PHP files three WordPress
+    # installs bring. Anything past the limit is evicted and recompiled on the
+    # next request, and each recompile is another round trip to EFS.
+    "opcache.max_accelerated_files"   = "20000"
+    "opcache.memory_consumption"      = "160"
+    "opcache.interned_strings_buffer" = "16"
+
+    # Revalidation stats every cached file to see whether it changed. On a local
+    # disk that is free; on NFS it is a network round trip, and the default of 2
+    # seconds means doing it constantly. AWS recommends 900 for EFS.
+    #
+    # Stale bytecode after an update is not a risk: WordPress calls
+    # opcache_invalidate() on every file it writes during a plugin, theme or
+    # core update, so its own changes take effect immediately regardless.
+    "opcache.validate_timestamps" = "1"
+    "opcache.revalidate_freq"     = "900"
   }
 }
 

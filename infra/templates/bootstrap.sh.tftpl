@@ -122,27 +122,28 @@ chmod 0644 /usr/local/lsws/conf/httpd_config.conf
 # Fetched once; the loop below stamps the domain into a copy per site.
 aws s3 cp "s3://$CONFIG_BUCKET/ols/vhconf.conf" /tmp/vhconf.template --region "$REGION" --quiet
 
-# PHP limits.
+# PHP settings.
 #
-# The image ships PHP's own defaults, which are sized for a shared host in 2005
-# and are wrong for WordPress in specific, visible ways: a 2 MB upload cap
-# rejects both a large plugin zip and an ordinary phone photo, and a 30-second
-# execution limit is under half what a big plugin update needs when the files
-# land on EFS at roughly 130 operations per second.
+# Written as a drop-in rather than edited into php.ini, because PHP parses the
+# scan directory after the main file and the image already ships an opcache.ini
+# there. A value set in php.ini can therefore be silently overridden; a "zz-"
+# file sorts last and wins.
 #
-# Edited in place rather than dropped in a conf.d, because this build has no
-# scan directory. php.ini lives on the root volume, so every replacement starts
-# from the image's copy again and this stays idempotent.
-PHP_INI="$(ls /usr/local/lsws/lsphp*/etc/php/*/litespeed/php.ini 2>/dev/null | head -1)"
-if [ -n "$PHP_INI" ]; then
+# The image ships PHP's own defaults, which are wrong for WordPress in specific,
+# visible ways: a 2 MB upload cap rejects both a large plugin zip and an
+# ordinary phone photo, and a 30-second execution limit is under half what a big
+# plugin update needs when the files land on EFS.
+PHP_SCAN_DIR="$(/usr/bin/php -i 2>/dev/null | awk -F'=> ' '/Scan this dir/ {print $2}' | tr -d ' \r')"
+if [ -n "$PHP_SCAN_DIR" ] && [ -d "$PHP_SCAN_DIR" ]; then
+  {
+    echo "; Managed by wp-bootstrap. Edits here are lost when the instance is replaced."
 %{ for key, value in php_settings ~}
-  if grep -qE '^[; ]*${key}[ ]*=' "$PHP_INI"; then
-    sed -i -E 's|^[; ]*${key}[ ]*=.*|${key} = ${value}|' "$PHP_INI"
-  else
-    echo '${key} = ${value}' >> "$PHP_INI"
-  fi
+    echo "${key} = ${value}"
 %{ endfor ~}
-  echo "PHP limits applied to $PHP_INI"
+  } > "$PHP_SCAN_DIR/zz-wordpress.ini"
+  echo "PHP settings written to $PHP_SCAN_DIR/zz-wordpress.ini"
+else
+  echo "WARNING: no PHP scan directory found; PHP settings not applied" >&2
 fi
 
 # WP-CLI.
