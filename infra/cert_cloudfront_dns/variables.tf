@@ -35,3 +35,9 @@ variable "policy_suffix" {
   type        = string
   default     = ""
 }
+
+variable "origin_read_timeout" {
+  description = "Seconds CloudFront waits for the origin to respond. 60 is the maximum without a service quota increase"
+  type        = number
+  default     = 60
+}

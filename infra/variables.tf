@@ -144,6 +144,17 @@ variable "alert_email" {
   type        = string
 }
 
+variable "origin_read_timeout" {
+  description = "Seconds CloudFront waits for the origin. Admin actions that rewrite many files on EFS are slow enough to exceed the 30-second default and surface as a 504; 60 is the maximum without a quota increase"
+  type        = number
+  default     = 60
+
+  validation {
+    condition     = var.origin_read_timeout >= 1 && var.origin_read_timeout <= 60
+    error_message = "Above 60 seconds CloudFront requires a service quota increase for the origin response timeout."
+  }
+}
+
 variable "enable_edge" {
   description = "Create the per-domain ACM certificates, CloudFront distributions and DNS records. Set false to build the server without claiming domains a live stack still serves"
   type        = bool

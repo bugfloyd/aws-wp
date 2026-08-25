@@ -26,7 +26,14 @@ resource "aws_cloudfront_distribution" "cloudfront" {
       origin_protocol_policy   = "http-only"
       origin_ssl_protocols     = ["TLSv1.2"]
       origin_keepalive_timeout = 60
-      origin_read_timeout      = 30
+
+      # Long enough to survive a WordPress admin action that rewrites files on
+      # EFS. Creating small files over NFS runs at roughly 130/sec against
+      # 21,000/sec on local disk, and a plugin update deletes the old directory
+      # and unpacks the new one file by file - about 30 seconds for a 2,000-file
+      # plugin like Yoast, before the download even starts. At the 30-second
+      # default that surfaces as a CloudFront 504 with no clue as to why.
+      origin_read_timeout = var.origin_read_timeout
     }
   }
 

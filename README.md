@@ -126,6 +126,14 @@ script it no longer matches.
 TLS is terminated at CloudFront with an ACM certificate and the origin is reached over plain
 HTTP, so there is no certificate on the instance and nothing to renew.
 
+**EFS bills in round trips, not bytes, and that shapes what the admin panel can do.** Creating
+small files over NFS runs at roughly 130/sec here against 21,000/sec on local disk. A plugin
+update deletes the old directory and unpacks the new one file by file, so a 2,000-file plugin
+like Yoast spends about 30 seconds on file operations alone. CloudFront's default 30-second
+origin timeout turns that into a 504 with no explanation, which is why `origin_read_timeout`
+is raised to 60 — the maximum without a service quota increase. A genuinely large plugin can
+still exceed it; those are better updated over SSM, away from CloudFront entirely.
+
 ## Versions
 
 Terraform, the AWS provider and the managed-service engines all track the current stable
