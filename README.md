@@ -67,9 +67,10 @@ each grow far past the average, and there is no swap. Raise the instance type be
 this.
 
 There is no Auto Scaling group at this stage and no load balancer health check, so nothing
-watches whether the site is actually responding — an EC2 status-check alarm catches the
-instance dying, not OpenLiteSpeed breaking while the instance is fine. The Scalable stage
-fixes both by putting a load balancer in front.
+*acts* when the site stops responding — an EC2 status-check alarm catches the instance dying,
+not OpenLiteSpeed breaking while the instance is fine. A Synthetics canary covers the
+noticing; the Scalable stage adds the acting, by putting a load balancer in front that can
+replace a failed instance rather than merely report it.
 
 ## Naming
 
@@ -124,6 +125,28 @@ script it no longer matches.
 
 TLS is terminated at CloudFront with an ACM certificate and the origin is reached over plain
 HTTP, so there is no certificate on the instance and nothing to renew.
+
+## Versions
+
+Terraform, the AWS provider and the managed-service engines all track the current stable
+release rather than whatever worked when this was written. For RDS that is not cosmetic:
+
+**A database left on a version past its RDS end of standard support is enrolled in Extended
+Support automatically, and billed per vCPU-hour.** Measured on this account, that is
+$0.118/vCPU-hour — **$172/month on a two-vCPU `db.t4g.micro` whose own instance cost is
+$13**. Nothing about the database looks different; the first sign is the bill.
+
+So `db_engine_version` is a variable, and new stacks are created with
+`engine_lifecycle_support = "open-source-rds-extended-support-disabled"`. That trade is
+deliberate: when support ends, AWS performs the major upgrade itself during a maintenance
+window instead of quietly charging to keep the old version running. For low-traffic sites,
+an upgrade you did not schedule is a better failure than a bill you did not notice.
+
+**That setting only works at creation.** RDS accepts it on create and on
+restore-from-snapshot and offers no way to modify it afterwards, so a database that already
+exists cannot be opted out — Terraform will report the change as applied and RDS will keep
+the old value. On a running database the only real protection is to upgrade
+`db_engine_version` before the deadline rather than after.
 
 ## Related projects
 
@@ -211,6 +234,28 @@ through that console is lost the next time the instance is replaced.
 
 CloudWatch alarms cover EFS burst credits, EFS IO limit, RDS free storage, and EC2 status
 checks. They publish to an SNS topic with an email subscription set by `alert_email`.
+
+Those four all watch infrastructure, and none of them catches the failure that actually
+happens: the web server coming up misconfigured while the machine underneath it is perfectly
+healthy. CloudFront makes it worse by continuing to serve the front page from cache, so the
+site looks fine from outside while everything dynamic returns 5xx.
+
+A **Synthetics canary** covers that gap — the only check here that makes a request the way a
+reader would. It requests `/wp-login.php`, which cannot be served from cache and which only
+returns 200 if PHP ran and WordPress reached the database, and it fails the run if the body
+comes back without a login form. Its alarm treats missing data as breaching, so a canary that
+stops reporting is itself an alert.
+
+Canary runs are billed individually, at $0.0014 each:
+
+| `canary_schedule_expression` | Runs/month | Cost |
+| ---------------------------- | ---------- | ---- |
+| `rate(5 minutes)` | 8,640 | ~$12.10 |
+| `rate(15 minutes)` (default) | 2,880 | ~$4.03 |
+| `rate(1 hour)` | 730 | ~$1.02 |
+
+Five minutes would add a third to the cost of the whole stack, which is the wrong trade for
+sites this quiet. Set `enable_canary = false` to drop it entirely.
 
 > [!IMPORTANT]
 > AWS emails a confirmation link when the subscription is created, and Terraform cannot

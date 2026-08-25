@@ -45,6 +45,12 @@ variable "webserver_http_port" {
   type        = number
   default     = 80
 }
+variable "db_engine_version" {
+  description = "MySQL major version, major.minor only so RDS applies the current patch release. Track the current LTS - a version past its RDS end of standard support is auto-enrolled in Extended Support and billed per vCPU-hour, which costs several times the instance itself"
+  type        = string
+  default     = "8.4"
+}
+
 variable "db_instance_class" {
   description = "RDS instance class. Note Performance Insights requires db.t4g.small or larger"
   type        = string
@@ -108,6 +114,24 @@ variable "enable_ols_cache" {
 variable "config_bucket_name" {
   description = "S3 bucket holding the rendered OpenLiteSpeed configuration the instances fetch at boot"
   type        = string
+}
+
+variable "enable_canary" {
+  description = "Run a CloudWatch Synthetics canary against the origin. The only check here that fails when the web server is broken but the instance is healthy"
+  type        = bool
+  default     = true
+}
+
+variable "canary_schedule_expression" {
+  description = "How often the canary runs. Runs are billed individually - at $0.0014 each, every 5 minutes is about $12/month and every 15 minutes about $4, against a stack that otherwise costs roughly $33"
+  type        = string
+  default     = "rate(15 minutes)"
+}
+
+variable "canary_runtime_version" {
+  description = "Synthetics runtime. AWS deprecates these on a schedule, so it is pinned rather than floating - check for a newer one when revisiting"
+  type        = string
+  default     = "syn-nodejs-puppeteer-17.0"
 }
 
 variable "alert_email" {

@@ -39,9 +39,9 @@ resource "aws_db_subnet_group" "websites" {
 }
 
 resource "aws_db_parameter_group" "websites" {
-  name        = "${var.stack_name}-mysql80"
-  family      = "mysql8.0"
-  description = "WordPress tuning for MySQL 8.0"
+  name        = "${var.stack_name}-mysql${replace(var.db_engine_version, ".", "")}"
+  family      = "mysql${var.db_engine_version}"
+  description = "WordPress tuning for MySQL ${var.db_engine_version}"
 
   parameter {
     name  = "character_set_server"
@@ -77,9 +77,33 @@ resource "aws_db_instance" "websites" {
   engine = "mysql"
   # Major.minor only, so RDS applies the current patch release rather than
   # pinning the stack to a version that will eventually be deprecated.
-  engine_version             = "8.0"
+  engine_version             = var.db_engine_version
   auto_minor_version_upgrade = true
-  instance_class             = var.db_instance_class
+
+  # Required before RDS will accept a change of major version. Left on, because
+  # db_engine_version is the deliberate control: a major upgrade only happens
+  # when that variable changes, and this flag just stops RDS from refusing it.
+  allow_major_version_upgrade = true
+  instance_class              = var.db_instance_class
+
+  # Refuse Extended Support rather than drift onto it silently.
+  #
+  # A version past its RDS end of standard support is auto-enrolled and billed
+  # per vCPU-hour: measured on this account, $0.118/vCPU-hr, which on a two-vCPU
+  # db.t4g.micro is $172/month against the instance's own $13. The first warning
+  # is the bill, because nothing about the database looks any different.
+  #
+  # The trade is real: with Extended Support off, AWS performs the major version
+  # upgrade itself during a maintenance window once support ends, instead of
+  # charging to leave the old version running. For low-traffic sites that is the
+  # better failure mode.
+  #
+  # This only takes effect at creation. RDS accepts EngineLifecycleSupport on
+  # create and on restore-from-snapshot, and has no modify equivalent - the
+  # setting on an instance that already exists cannot be changed at all. So it
+  # is ignored after creation, and the real protection for a running database
+  # is db_engine_version: upgrade before the deadline rather than after.
+  engine_lifecycle_support = "open-source-rds-extended-support-disabled"
 
   allocated_storage     = var.db_allocated_storage
   max_allocated_storage = var.db_max_allocated_storage
@@ -120,6 +144,10 @@ resource "aws_db_instance" "websites" {
   tags = {
     Name       = "WebsitesDatabase"
     CostCenter = "Bugfloyd/Websites/Database"
+  }
+
+  lifecycle {
+    ignore_changes = [engine_lifecycle_support]
   }
 }
 
