@@ -1,5 +1,5 @@
 resource "aws_iam_role" "instance_role" {
-  name = "wp_ols_ec2_role"
+  name = "${var.stack_name}-ec2-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -18,15 +18,26 @@ resource "aws_iam_role" "instance_role" {
     Name       = "WebsitesInstanceRole"
     CostCenter = "Bugfloyd/Websites/Instance"
   }
+
+  # Renaming an IAM role replaces it, and the replacement has to exist before
+  # the running instance can be pointed at it - AWS refuses to delete an
+  # instance profile that an instance is still associated with.
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_iam_instance_profile" "ols_instance_profile" {
-  name = "wp_webserver_instance_profile"
+  name = "${var.stack_name}-instance-profile"
   role = aws_iam_role.instance_role.name
 
   tags = {
     Name       = "WebsitesInstanceIAMProfile"
     CostCenter = "Bugfloyd/Websites/Instance"
+  }
+
+  lifecycle {
+    create_before_destroy = true
   }
 }
 
@@ -40,7 +51,7 @@ resource "aws_iam_role_policy_attachment" "ssm_core" {
 }
 
 resource "aws_iam_policy" "bootstrap" {
-  name        = "WebsitesInstanceBootstrapPolicy"
+  name        = "${var.stack_name}-bootstrap-policy"
   description = "Read the database and WebAdmin credentials needed at instance boot"
 
   policy = jsonencode({

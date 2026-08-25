@@ -8,7 +8,7 @@
 # survives moving to RDS and shared storage.
 
 resource "aws_backup_vault" "websites" {
-  name = "websites-backup-vault"
+  name = "${var.stack_name}-backup-vault"
 
   tags = {
     Name       = "WebsitesBackupVault"
@@ -17,7 +17,7 @@ resource "aws_backup_vault" "websites" {
 }
 
 resource "aws_backup_plan" "websites" {
-  name = "websites-daily"
+  name = "${var.stack_name}-daily"
 
   rule {
     rule_name         = "daily-retain-30-days"
@@ -49,7 +49,7 @@ resource "aws_backup_plan" "websites" {
 }
 
 resource "aws_iam_role" "backup" {
-  name = "websites_backup_role"
+  name = "${var.stack_name}-backup-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -84,7 +84,7 @@ resource "aws_iam_role_policy_attachment" "restore" {
 }
 
 resource "aws_backup_selection" "efs" {
-  name         = "websites-efs"
+  name         = "${var.stack_name}-efs"
   plan_id      = aws_backup_plan.websites.id
   iam_role_arn = aws_iam_role.backup.arn
 

@@ -14,7 +14,7 @@ resource "random_password" "ols_admin" {
 # identical by design. SecureString is free; Secrets Manager would be $0.40/mo
 # for the same thing.
 resource "aws_ssm_parameter" "ols_admin_password" {
-  name        = "/websites/ols/admin-password"
+  name        = "/${var.stack_name}/ols/admin-password"
   description = "OpenLiteSpeed WebAdmin password, applied at instance boot"
   type        = "SecureString"
   value       = random_password.ols_admin.result

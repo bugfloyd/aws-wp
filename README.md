@@ -63,6 +63,34 @@ watches whether the site is actually responding — an EC2 status-check alarm ca
 instance dying, not OpenLiteSpeed breaking while the instance is fine. The Scalable stage
 fixes both by putting a load balancer in front.
 
+## Naming
+
+Every resource whose name has to be unique somewhere is prefixed with `stack_name`
+(default `websites`), so a second stack in the same account is one variable away rather
+than a scavenger hunt. What the prefix is worth depends entirely on how wide that
+uniqueness scope is:
+
+| Scope | Resources | Collides with |
+| ----- | --------- | ------------- |
+| The account | IAM roles, policies and instance profiles; CloudFront cache and origin request policies | any stack you own, anywhere |
+| The region | RDS instance, subnet and parameter groups; EFS; SNS; CloudWatch alarms; AWS Backup vault and plan; the SSM parameter; the EC2 key pair | any stack in the same region |
+| The VPC | security groups | nothing — each stack builds its own VPC |
+| Globally | the two S3 buckets | every AWS customer, which is why they stay explicit variables |
+
+Security groups are deliberately left unprefixed. Their names are unique per VPC and every
+stack brings its own, so a prefix there buys nothing and only makes the rename churn.
+
+Two names resist the scheme and are worth knowing about:
+
+- **The EFS creation token** is an idempotency key, not a label. Reusing one returns the
+  existing file system instead of failing, so two stacks sharing a token would silently
+  share storage. It is also create-only — changing it destroys the data — so the resource
+  ignores changes to it and only new stacks pick up the derived name.
+- **`edge_policy_suffix`** stays separate from `stack_name` because CloudFront policy names
+  are unique account-wide *and* the stack being replaced keeps its policies until its
+  distributions are deleted. That is the one name that must differ between two generations
+  of the same stack.
+
 ## How an instance configures itself
 
 Three kinds of state used to live on the instance: **files**, the **database**, and
@@ -168,7 +196,7 @@ aws ssm start-session --target i-xxxx \
 # then https://localhost:7080
 ```
 
-The password is in Parameter Store at `/websites/ols/admin-password`. Anything changed
+The password is in Parameter Store at `/<stack_name>/ols/admin-password`. Anything changed
 through that console is lost the next time the instance is replaced.
 
 ## Alerting

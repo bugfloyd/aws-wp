@@ -9,7 +9,7 @@
 # do. It does not fail the apply, and nothing is delivered until confirmed.
 
 resource "aws_sns_topic" "alerts" {
-  name         = "websites-alerts"
+  name         = "${var.stack_name}-alerts"
   display_name = "Websites"
 
   tags = {
@@ -33,7 +33,7 @@ resource "aws_sns_topic_subscription" "alerts_email" {
 # balancer in front, which also lets a failed instance be replaced rather than
 # merely reported.
 resource "aws_cloudwatch_metric_alarm" "instance_status" {
-  alarm_name          = "websites-instance-status-failed"
+  alarm_name          = "${var.stack_name}-instance-status-failed"
   alarm_description   = "The web server instance is failing its EC2 status checks"
   namespace           = "AWS/EC2"
   metric_name         = "StatusCheckFailed"
@@ -59,7 +59,7 @@ resource "aws_cloudwatch_metric_alarm" "instance_status" {
 
 # Storage autoscaling handles growth, but only up to var.db_max_allocated_storage.
 resource "aws_cloudwatch_metric_alarm" "rds_storage_low" {
-  alarm_name          = "websites-rds-storage-low"
+  alarm_name          = "${var.stack_name}-rds-storage-low"
   alarm_description   = "RDS free storage is running low"
   namespace           = "AWS/RDS"
   metric_name         = "FreeStorageSpace"

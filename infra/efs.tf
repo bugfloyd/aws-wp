@@ -32,8 +32,20 @@ resource "aws_security_group" "efs" {
 }
 
 resource "aws_efs_file_system" "websites" {
-  creation_token = "bugfloyd-websites"
+  # The creation token is an idempotency key, not a label: creating a file
+  # system with a token that already exists returns the existing one rather
+  # than failing. Two stacks sharing a token would therefore silently share
+  # storage - a worse failure than a name clash, because nothing reports it.
+  #
+  # It is also create-only. Changing it on a live file system would destroy
+  # every site file, so an existing stack keeps whatever token it was built
+  # with and only new stacks pick the derived name.
+  creation_token = "${var.stack_name}-efs"
   encrypted      = true
+
+  lifecycle {
+    ignore_changes = [creation_token]
+  }
 
   # Set both explicitly rather than inheriting AWS defaults, which have changed
   # over time. Bursting throughput is predictable and free; Elastic bills per
@@ -65,7 +77,7 @@ resource "aws_efs_mount_target" "data_b" {
 # updates touch thousands of small files and can drain them quickly. Once the
 # balance hits zero, throughput is throttled to baseline and the site crawls.
 resource "aws_cloudwatch_metric_alarm" "efs_burst_credits_low" {
-  alarm_name          = "websites-efs-burst-credits-low"
+  alarm_name          = "${var.stack_name}-efs-burst-credits-low"
   alarm_description   = "EFS burst credit balance is dropping; sustained throughput will be throttled once it reaches zero"
   namespace           = "AWS/EFS"
   metric_name         = "BurstCreditBalance"
@@ -95,7 +107,7 @@ resource "aws_cloudwatch_metric_alarm" "efs_burst_credits_low" {
 # document root on shared storage is unusually operation-heavy, so this is the
 # other way EFS degrades before it runs out of anything visible.
 resource "aws_cloudwatch_metric_alarm" "efs_io_limit" {
-  alarm_name          = "websites-efs-io-limit-high"
+  alarm_name          = "${var.stack_name}-efs-io-limit-high"
   alarm_description   = "EFS is approaching the General Purpose file operations limit"
   namespace           = "AWS/EFS"
   metric_name         = "PercentIOLimit"

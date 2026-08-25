@@ -2,6 +2,19 @@ variable "region" {
   default = "eu-west-1"
 }
 
+variable "stack_name" {
+  description = "Prefix for every resource name whose uniqueness scope is wider than the VPC. Security groups are left out deliberately - their names are unique per VPC, and each stack builds its own, so they cannot collide"
+  type        = string
+  default     = "websites"
+
+  validation {
+    # The narrowest rule any resource using this imposes is the RDS
+    # identifier: lowercase alphanumerics and hyphens, starting with a letter.
+    condition     = can(regex("^[a-z][a-z0-9-]{1,23}$", var.stack_name))
+    error_message = "stack_name must be 2-24 characters of lowercase letters, digits and hyphens, starting with a letter."
+  }
+}
+
 variable "ols_image_id" {
   description = "The ID of the AMI to be used for EC2 instance"
   type        = string
@@ -109,13 +122,13 @@ variable "enable_edge" {
 }
 
 variable "key_pair_name" {
-  description = "Name of the EC2 key pair. Key pair names are unique per region, so a replacement stack running alongside an existing one needs its own"
+  description = "Overrides the key pair name, which defaults to \"<stack_name>-key\". Worth pinning on an existing stack: the name is unique per region, and changing it replaces the instance"
   type        = string
-  default     = "WebsitesKeyPair"
+  default     = null
 }
 
 variable "edge_policy_suffix" {
-  description = "Suffix for CloudFront policy names, which are unique account-wide"
+  description = "Suffix for CloudFront cache and origin request policy names, which are unique account-wide. Separate from stack_name because these are the one set of names that has to differ from a stack being replaced while both are live - the old distributions keep their policies until they are deleted"
   type        = string
   default     = ""
 }

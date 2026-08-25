@@ -26,7 +26,7 @@ resource "aws_security_group" "rds" {
 }
 
 resource "aws_db_subnet_group" "websites" {
-  name       = "websites-db-subnet-group"
+  name       = "${var.stack_name}-db-subnet-group"
   subnet_ids = [aws_subnet.data_a.id, aws_subnet.data_b.id]
 
   # RDS requires subnets in at least two Availability Zones even for a
@@ -39,7 +39,7 @@ resource "aws_db_subnet_group" "websites" {
 }
 
 resource "aws_db_parameter_group" "websites" {
-  name        = "websites-mysql80"
+  name        = "${var.stack_name}-mysql80"
   family      = "mysql8.0"
   description = "WordPress tuning for MySQL 8.0"
 
@@ -72,7 +72,7 @@ resource "aws_db_parameter_group" "websites" {
 }
 
 resource "aws_db_instance" "websites" {
-  identifier = "websites-mysql"
+  identifier = "${var.stack_name}-mysql"
 
   engine = "mysql"
   # Major.minor only, so RDS applies the current patch release rather than
