@@ -1,5 +1,15 @@
+# The web server.
+#
+# One instance, deliberately. This stage is about removing state from the
+# instance, not about running several of them - the Scalable stage introduces
+# a load balancer and an Auto Scaling group. Keeping the shape of the previous
+# stage means the difference between them is exactly the thing being taught.
+#
+# Everything that makes this instance serve a site happens in user_data at
+# first boot, so it can be destroyed and recreated without losing anything.
+
 resource "aws_key_pair" "websites_key_pair" {
-  key_name   = "WebsitesKeyPair"
+  key_name   = coalesce(var.key_pair_name, "${var.stack_name}-key")
   public_key = var.admin_public_key
 
   tags = {
@@ -9,18 +19,33 @@ resource "aws_key_pair" "websites_key_pair" {
 }
 
 resource "aws_instance" "webserver" {
-  ami           = var.ols_image_id
-  instance_type = "t3.small"
-  key_name      = aws_key_pair.websites_key_pair.key_name
-
-  network_interface {
-    network_interface_id = aws_network_interface.webserver.id
-    device_index         = 0
-  }
+  ami                    = var.ols_image_id
+  instance_type          = var.instance_type
+  subnet_id              = aws_subnet.public_a.id
+  vpc_security_group_ids = [aws_security_group.ec2_web.id]
+  key_name               = aws_key_pair.websites_key_pair.key_name
+  iam_instance_profile   = aws_iam_instance_profile.ols_instance_profile.name
 
   root_block_device {
-    volume_size = 20
+    volume_size           = 20
+    volume_type           = "gp3"
+    encrypted             = true
+    delete_on_termination = true
   }
+
+  # Compressed, because EC2 caps user data at 16 KB and the script passed it.
+  #
+  # cloud-init sniffs the gzip magic bytes and decompresses before running, so
+  # this costs nothing at boot. The script is mostly comments explaining why each
+  # step exists, which is the point of it - trimming those to fit would be
+  # deleting the documentation to make room for the code. 17 KB becomes about
+  # 6.6, which leaves room to keep explaining things.
+  user_data_base64 = base64gzip(local.bootstrap)
+
+  # Rebuild the instance when the bootstrap changes, rather than leaving a
+  # running box configured by a script it no longer matches. This is what keeps
+  # the instance disposable in practice and not just in principle.
+  user_data_replace_on_change = true
 
   tags = {
     Name       = "WebserverInstance"
@@ -28,27 +53,27 @@ resource "aws_instance" "webserver" {
   }
 }
 
-resource "aws_route53_record" "main_dns_record" {
-  for_each = var.domains
+# CloudFront needs an origin hostname that survives the instance being
+# replaced. Without an Elastic IP the public DNS name changes on every rebuild
+# and every distribution silently points at nothing.
+resource "aws_eip" "webserver" {
+  instance = aws_instance.webserver.id
+  domain   = "vpc"
 
-  zone_id = each.value
-  name    = each.key
-  type    = "A"
-  ttl     = 300
-  records = [aws_instance.webserver.public_ip]
+  tags = {
+    Name       = "WebserverElasticIP"
+    CostCenter = "Bugfloyd/Websites/Instance"
+  }
+
+  depends_on = [aws_internet_gateway.internet_gateway]
 }
 
-resource "aws_route53_record" "www_dns_record" {
-  for_each = var.domains
-
-  zone_id = each.value
-  name    = "www.${each.key}"
-  type    = "A"
-  ttl     = 300
-  records = [aws_instance.webserver.public_ip]
+output "webserver_public_ip" {
+  description = "Stable public address of the web server"
+  value       = aws_eip.webserver.public_ip
 }
 
-output "webserver_instance_ip" {
-  description = "The public IP address of the webserver EC2 instance"
-  value       = aws_instance.webserver.public_ip
+output "webserver_public_dns" {
+  description = "Origin hostname the CloudFront distributions point at"
+  value       = aws_eip.webserver.public_dns
 }

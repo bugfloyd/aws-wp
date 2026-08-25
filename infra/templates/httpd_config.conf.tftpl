@@ -1,0 +1,195 @@
+# OpenLiteSpeed server configuration, rendered at boot from Terraform values.
+#
+# Instances are disposable, so this file is regenerated on every launch rather
+# than edited in place. Anything changed through the WebAdmin console is lost at
+# the next instance refresh - that is intended, not a limitation to work around.
+
+serverName                
+user                      www-data
+group                     www-data
+priority                  0
+inMemBufSize              60M
+swappingDir               /tmp/lshttpd/swap
+autoFix503                1
+gracefulRestartTimeout    300
+mime                      conf/mime.properties
+showVersionNumber         0
+
+# The load balancer terminates TLS and forwards over HTTP, so the client IP
+# arrives in X-Forwarded-For. Without this every request appears to come from
+# the load balancer, which breaks rate limiting and comment spam filtering.
+useIpInProxyHeader        2
+
+errorlog logs/error.log {
+  logLevel                ERROR
+  debugLevel              0
+  rollingSize             10M
+  keepDays                7
+  enableStderrLog         1
+}
+
+accesslog logs/access.log {
+  rollingSize             10M
+  keepDays                7
+  compressArchive         1
+}
+
+indexFiles                index.php, index.html
+
+expires  {
+  enableExpires           1
+  expiresByType           image/*=A604800,text/css=A604800,application/x-javascript=A604800,application/javascript=A604800,font/*=A604800,application/x-font-ttf=A604800
+}
+
+tuning  {
+  maxConnections          2000
+  maxSSLConnections       2000
+  connTimeout             300
+  maxKeepAliveReq         1000
+  keepAliveTimeout        5
+  sndBufSize              0
+  rcvBufSize              0
+  maxReqURLLen            32768
+  maxReqHeaderSize        65536
+  maxReqBodySize          512M
+  maxDynRespHeaderSize    32768
+  maxDynRespSize          512M
+  maxCachedFileSize       4096
+  totalInMemCacheSize     20M
+  maxMMapFileSize         256K
+  totalMMapCacheSize      40M
+  useSendfile             1
+  fileETag                28
+  enableGzipCompress      1
+  compressibleTypes       default
+  enableDynGzipCompress   1
+  gzipCompressLevel       6
+  gzipAutoUpdateStatic    1
+  gzipStaticCompressLevel 6
+  brStaticCompressLevel   6
+  gzipMaxFileSize         10M
+  gzipMinFileSize         300
+  quicEnable              0
+}
+
+fileAccessControl  {
+  followSymbolLink        1
+  checkSymbolLink         0
+  requiredPermissionMask  000
+  restrictedPermissionMask 000
+}
+
+perClientConnLimit  {
+  staticReqPerSec         0
+  dynReqPerSec            0
+  outBandwidth            0
+  inBandwidth             0
+  softLimit               1000
+  hardLimit               1000
+  gracePeriod             15
+  banPeriod               300
+}
+
+accessDenyDir  {
+  dir                     /
+  dir                     /etc/*
+  dir                     /dev/*
+  dir                     conf/*
+  dir                     admin/conf/*
+}
+
+accessControl  {
+  allow                   ALL
+}
+
+# Required. Without this block OpenLiteSpeed routes every external application
+# launch through its suEXEC helper, and this build ships no lscgid binary, so
+# PHP fails with "cgidSuEXEC failed" and every request returns 503.
+CGIRLimit  {
+  maxCGIInstances         20
+  minUID                  11
+  minGID                  10
+  priority                0
+  CPUSoftLimit            10
+  CPUHardLimit            50
+  memSoftLimit            2047M
+  memHardLimit            2047M
+  procSoftLimit           400
+  procHardLimit           450
+}
+
+# One PHP pool for the whole server rather than one per virtual host. Per-vhost
+# pools multiply the worker count - and therefore the database connections - by
+# the number of sites, which is exactly the ceiling problem in section 5a of the
+# plan. This keeps the budget flat as domains are added.
+extprocessor lsphp {
+  type                    lsapi
+  address                 uds://tmp/lshttpd/lsphp.sock
+  maxConns                ${php_children}
+  env                     PHP_LSAPI_CHILDREN=${php_children}
+  env                     LSAPI_AVOID_FORK=200M
+  initTimeout             60
+  retryTimeout            0
+  persistConn             1
+  respBuffer              0
+  autoStart               2
+  path                    lsphp83/bin/lsphp
+  backlog                 100
+  instances               1
+  priority                0
+  memSoftLimit            512M
+  memHardLimit            768M
+}
+
+scripthandler  {
+  add                     lsapi:lsphp php
+}
+
+# Server level cache module. Disabled here: the Cached stage turns this on and
+# pairs it with the LiteSpeed Cache plugin. Left in place so that stage is a
+# value change rather than a restructure.
+module cache {
+  internal                1
+  checkPrivateCache       1
+  checkPublicCache        1
+  maxCacheObjSize         10000000
+  maxStaleAge             0
+  qsCache                 1
+  reqCookieCache          1
+  respCookieCache         1
+  ignoreReqCacheCtrl      1
+  ignoreRespCacheCtrl     0
+  enableCache             ${enable_cache}
+  expireInSeconds         3600
+  enablePrivateCache      0
+  privateExpireInSeconds  3600
+  ls_enabled              ${enable_cache}
+}
+
+listener wordpress {
+  address                 *:${http_port}
+  secure                  0
+%{ for i, domain in domains ~}
+%{ if i == 0 ~}
+  # The first domain also takes "*", so requests whose Host matches nothing
+  # still reach a virtual host. The load balancer's health check addresses the
+  # target by IP and cannot send a Host header, so without this catch-all every
+  # check gets a 404, every target is marked unhealthy, and the group replaces
+  # instances forever.
+  map                     ${domain} ${domain}, www.${domain}, *
+%{ else ~}
+  map                     ${domain} ${domain}, www.${domain}
+%{ endif ~}
+%{ endfor ~}
+}
+
+%{ for domain in domains ~}
+virtualhost ${domain} {
+  vhRoot                  /var/www/${domain}
+  configFile              $SERVER_ROOT/conf/vhosts/${domain}/vhconf.conf
+  allowSymbolLink         1
+  enableScript            1
+  restrained              1
+}
+
+%{ endfor ~}

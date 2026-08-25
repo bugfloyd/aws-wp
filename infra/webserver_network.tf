@@ -1,45 +1,27 @@
-resource "aws_network_interface" "webserver" {
-  subnet_id       = aws_subnet.public_a.id
-  security_groups = [aws_security_group.ec2_web.id]
-
-  tags = {
-    Name       = "WebserverInstanceNetworkInterface"
-    CostCenter = "Bugfloyd/Websites/Instance"
-  }
-}
-
-# Security Group for EC2 Instance
+# Only CloudFront may reach the web server, and only on the port it serves.
+#
+# The managed prefix list covers CloudFront's origin-facing ranges, so the
+# instance is publicly routable but not publicly reachable. TLS is terminated
+# at CloudFront with an ACM certificate, which is why there is no 443 rule and
+# no certificate on the instance at all.
 resource "aws_security_group" "ec2_web" {
   name        = "WebsitesInstanceSecurityGroupWeb"
-  description = "Security Group for the WordPress EC2 instance"
+  description = "Security Group for the WordPress instance: HTTP from CloudFront, SSH from admin"
   vpc_id      = aws_vpc.bugfloyd.id
 
   ingress {
-    description = "Allow HTTP from anywhere"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    description     = "Allow HTTP from CloudFront only"
+    from_port       = var.webserver_http_port
+    to_port         = var.webserver_http_port
+    protocol        = "tcp"
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
   }
 
+  # Fallback access. Session Manager is the usual route in - the agent is baked
+  # into the image and needs no inbound rule at all - but a key-based login is
+  # worth keeping for the case where the agent itself is what is broken.
   ingress {
-    description = "Allow HTTPS from anywhere"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    description = "Allow TCP 7080 from admin"
-    from_port   = 7080
-    to_port     = 7080
-    protocol    = "tcp"
-    cidr_blocks = var.admin_ips
-  }
-
-  ingress {
-    description = "Allow SSH from Instance Connect"
+    description = "Allow SSH from admin addresses"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
@@ -57,4 +39,8 @@ resource "aws_security_group" "ec2_web" {
     Name       = "WebsitesInstanceSecurityGroupWeb"
     CostCenter = "Bugfloyd/Websites/Instance"
   }
+}
+
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
 }

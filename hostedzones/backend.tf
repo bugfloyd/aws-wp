@@ -1,13 +1,14 @@
 terraform {
   backend "s3" {
-    key     = "hosted-zones-state/terraform.tfstate"
-    encrypt = true
+    key          = "hosted-zones-state/terraform.tfstate"
+    encrypt      = true
+    use_lockfile = true
   }
 
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.88"
+      version = "~> 6.0"
     }
   }
 

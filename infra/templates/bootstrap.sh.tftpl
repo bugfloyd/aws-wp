@@ -1,0 +1,440 @@
+#!/bin/bash
+#
+# Runs on every instance launch. Must be idempotent: instances are replaced
+# constantly, and several may boot at once during a scale-out.
+#
+# Order matters. Shared storage has to be mounted before OpenLiteSpeed starts,
+# because the document root lives on it.
+
+set -euo pipefail
+exec > >(tee -a /var/log/wp-bootstrap.log) 2>&1
+echo "=== wp-bootstrap starting $(date -Is) ==="
+
+REGION="${region}"
+FSX_DNS="${fsx_dns}"
+DB_SECRET_ARN="${db_secret_arn}"
+DB_HOST="${db_host}"
+OLS_ADMIN_PARAM="${ols_admin_param}"
+HTTP_PORT="${http_port}"
+CONFIG_BUCKET="${config_bucket}"
+# config-revision: ${config_revision}
+DOMAINS=(${domain_list})
+
+# ---------------------------------------------------------------------------
+# 1. Trim attack surface
+# ---------------------------------------------------------------------------
+# nfs-common pulls in rpcbind, which listens on 0.0.0.0:111. NFSv4 does not use
+# the portmapper, so it is pure exposure.
+systemctl disable --now rpcbind rpcbind.socket >/dev/null 2>&1 || true
+
+# ---------------------------------------------------------------------------
+# 2. Swap
+# ---------------------------------------------------------------------------
+# Insurance against the tail, not a substitute for memory. LSPHP workers cost
+# about 26 MB each in shared pages, but PHP's memory_limit is 128 MB, so a
+# handful of simultaneously heavy requests can each grow far past the average.
+# Without swap that is an OOM kill; with it, the worst case is a slow request.
+#
+# swappiness is dropped from the default 60 so the kernel reaches for this only
+# under real pressure rather than paging out idle workers to grow the page
+# cache - on a file-heavy WordPress box the default trades latency for nothing.
+if ! swapon --show | grep -q /swapfile; then
+  fallocate -l 1G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=1024
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+fi
+
+if ! grep -q '^/swapfile' /etc/fstab; then
+  echo "/swapfile none swap sw 0 0" >> /etc/fstab
+fi
+
+sysctl -w vm.swappiness=10 >/dev/null
+echo "vm.swappiness=10" > /etc/sysctl.d/99-swappiness.conf
+
+# ---------------------------------------------------------------------------
+# 3. Mount shared storage
+# ---------------------------------------------------------------------------
+mkdir -p /var/www
+
+# FSx for OpenZFS exports the root volume at /fsx, not at /. NFS 4.2 is what
+# AWS documents for it; 4.1 also works but 4.2 is the tested path.
+#
+# Deliberately no "noresvport", which EFS documentation recommends and which
+# breaks this outright. FSx exports default to the "secure" option, meaning the
+# client must connect from a privileged source port; noresvport asks for the
+# opposite and the server answers "Operation not permitted" - an error that
+# reads like a permissions problem in the export or the security group, and is
+# neither. Mount options do not transfer between file systems just because both
+# speak NFS.
+if ! grep -q "$FSX_DNS" /etc/fstab; then
+  echo "$FSX_DNS:/fsx /var/www nfs nfsvers=4.2,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,_netdev 0 0" >> /etc/fstab
+fi
+
+# The file system can lag behind the instance during a cold start, so retry.
+for attempt in $(seq 1 30); do
+  if mountpoint -q /var/www; then break; fi
+  mount /var/www && break || true
+  echo "shared storage not ready yet (attempt $attempt), retrying..."
+  sleep 10
+done
+
+if ! mountpoint -q /var/www; then
+  echo "FATAL: could not mount $FSX_DNS:/fsx at /var/www"
+  exit 1
+fi
+echo "shared storage mounted at /var/www"
+
+# ---------------------------------------------------------------------------
+# 4. Credentials
+# ---------------------------------------------------------------------------
+DB_SECRET=$(aws secretsmanager get-secret-value \
+  --secret-id "$DB_SECRET_ARN" --region "$REGION" \
+  --query SecretString --output text)
+DB_ADMIN_USER=$(echo "$DB_SECRET" | python3 -c 'import json,sys; print(json.load(sys.stdin)["username"])')
+DB_ADMIN_PASS=$(echo "$DB_SECRET" | python3 -c 'import json,sys; print(json.load(sys.stdin)["password"])')
+
+OLS_ADMIN_PASS=$(aws ssm get-parameter \
+  --name "$OLS_ADMIN_PARAM" --with-decryption --region "$REGION" \
+  --query Parameter.Value --output text)
+
+mysql_admin() {
+  MYSQL_PWD="$DB_ADMIN_PASS" mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" --protocol=TCP "$@"
+}
+
+# ---------------------------------------------------------------------------
+# 5. WebAdmin credentials
+# ---------------------------------------------------------------------------
+# The image ships a bcrypt hash from the package install whose plaintext nobody
+# recorded. Replace it with a known value held in Parameter Store, so the
+# console can actually be used for inspection and the secret can be rotated
+# without rebuilding the image.
+ENCRYPTED=$(/usr/local/lsws/admin/fcgi-bin/admin_php \
+  -c /usr/local/lsws/admin/conf/php.ini \
+  -q /usr/local/lsws/admin/misc/htpasswd.php "$OLS_ADMIN_PASS")
+echo "admin:$ENCRYPTED" > /usr/local/lsws/admin/conf/htpasswd
+chown lsadm:lsadm /usr/local/lsws/admin/conf/htpasswd
+chmod 600 /usr/local/lsws/admin/conf/htpasswd
+
+aws s3 cp "s3://$CONFIG_BUCKET/ols/admin_config.conf" \
+  /usr/local/lsws/admin/conf/admin_config.conf --region "$REGION" --quiet
+chown lsadm:lsadm /usr/local/lsws/admin/conf/admin_config.conf
+chmod 0644 /usr/local/lsws/admin/conf/admin_config.conf
+
+# ---------------------------------------------------------------------------
+# 6. Server configuration
+# ---------------------------------------------------------------------------
+aws s3 cp "s3://$CONFIG_BUCKET/ols/httpd_config.conf" \
+  /usr/local/lsws/conf/httpd_config.conf --region "$REGION" --quiet
+chown lsadm:www-data /usr/local/lsws/conf/httpd_config.conf
+chmod 0644 /usr/local/lsws/conf/httpd_config.conf
+
+# Fetched once; the loop below stamps the domain into a copy per site.
+aws s3 cp "s3://$CONFIG_BUCKET/ols/vhconf.conf" /tmp/vhconf.template --region "$REGION" --quiet
+
+# PHP settings.
+#
+# Written as a drop-in rather than edited into php.ini, because PHP parses the
+# scan directory after the main file and the image already ships an opcache.ini
+# there. A value set in php.ini can therefore be silently overridden; a "zz-"
+# file sorts last and wins.
+#
+# The image ships PHP's own defaults, which are wrong for WordPress in specific,
+# visible ways: a 2 MB upload cap rejects both a large plugin zip and an
+# ordinary phone photo, and a 30-second execution limit is under half what a big
+# plugin update needs when the files land on shared storage.
+PHP_SCAN_DIR="$(/usr/bin/php -i 2>/dev/null | awk -F'=> ' '/Scan this dir/ {print $2}' | tr -d ' \r')"
+if [ -n "$PHP_SCAN_DIR" ] && [ -d "$PHP_SCAN_DIR" ]; then
+  {
+    echo "; Managed by wp-bootstrap. Edits here are lost when the instance is replaced."
+%{ for key, value in php_settings ~}
+    echo "${key} = ${value}"
+%{ endfor ~}
+  } > "$PHP_SCAN_DIR/zz-wordpress.ini"
+  echo "PHP settings written to $PHP_SCAN_DIR/zz-wordpress.ini"
+else
+  echo "WARNING: no PHP scan directory found; PHP settings not applied" >&2
+fi
+
+# WP-CLI.
+#
+# The admin panel drives updates through CloudFront, which caps how long it will
+# wait for the origin. WP-CLI runs on the box over SSM with no such ceiling, so
+# it is the way to move a plugin large enough to outlast the timeout - and the
+# only way to do anything at all when the admin panel is what is broken.
+if [ ! -x /usr/local/bin/wp ]; then
+  curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
+    -o /usr/local/bin/wp && chmod 0755 /usr/local/bin/wp
+fi
+
+# WordPress refuses to run WP-CLI as root without --allow-root. Rather than
+# teach everyone that flag, wrap it so it drops to the web user, which is also
+# the ownership every file it writes needs to end up with.
+cat > /usr/local/bin/wp-site <<'WPSITE'
+#!/bin/bash
+# usage: wp-site <domain> <wp-cli args...>
+set -euo pipefail
+DOMAIN="$1"; shift
+exec sudo -u "#33" -g "#33" /usr/local/bin/wp --path="/var/www/$DOMAIN/html" "$@"
+WPSITE
+chmod 0755 /usr/local/bin/wp-site
+
+# ---------------------------------------------------------------------------
+# 7. Per-site setup, guarded so concurrent launches cannot collide
+# ---------------------------------------------------------------------------
+exec 200>/var/www/.bootstrap.lock
+flock -w 600 200 || { echo "FATAL: timed out waiting for the bootstrap lock"; exit 1; }
+echo "Acquired bootstrap lock"
+
+for DOMAIN in "$${DOMAINS[@]}"; do
+  echo "--- $DOMAIN ---"
+  DB_NAME=$(echo "$DOMAIN" | tr '.-' '__')
+  DB_USER="wp_$(echo "$DOMAIN" | md5sum | cut -c1-12)"
+  SITE_ROOT="/var/www/$DOMAIN"
+  HTML_ROOT="$SITE_ROOT/html"
+
+  mkdir -p "$HTML_ROOT" "$SITE_ROOT/logs"
+
+  # Per-vhost config is local to the instance, not on shared storage: derived state,
+  # regenerated on every boot from the launch template.
+  mkdir -p "/usr/local/lsws/conf/vhosts/$DOMAIN"
+  cp /tmp/vhconf.template "/usr/local/lsws/conf/vhosts/$DOMAIN/vhconf.conf"
+  sed -i "s/__DOMAIN__/$DOMAIN/g" "/usr/local/lsws/conf/vhosts/$DOMAIN/vhconf.conf"
+  chown -R lsadm:www-data "/usr/local/lsws/conf/vhosts/$DOMAIN"
+
+  # Answer health checks before WordPress exists, otherwise the target is
+  # marked unhealthy and the instance is replaced before it can finish.
+  if [ ! -e "$HTML_ROOT/index.html" ] && [ ! -e "$HTML_ROOT/index.php" ]; then
+    echo "<!doctype html><title>provisioning</title>provisioning" > "$HTML_ROOT/index.html"
+  fi
+
+  if [ -e "$HTML_ROOT/wp-config.php" ]; then
+    echo "WordPress already present, skipping install"
+
+    # Do not walk the tree unless it is actually wrong. A recursive chown over
+    # NFS costs a round trip per file - minutes for a real site, on every
+    # single boot - to re-apply ownership an earlier boot already set. That is
+    # long enough that an instance replacement serves 504s while it runs.
+    #
+    # wp-config.php is the last thing written during an install, so if it is
+    # already owned correctly the rest of the tree is too.
+    if [ "$(stat -c %u:%g "$HTML_ROOT/wp-config.php" 2>/dev/null)" != "33:33" ]; then
+      echo "ownership drifted, normalising $SITE_ROOT"
+      chown -R 33:33 "$SITE_ROOT" || true
+    fi
+
+    continue
+  fi
+
+  DB_PASS=$(openssl rand -base64 32 | tr -d '=/+' | cut -c1-24)
+
+  mysql_admin -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+  mysql_admin -e "CREATE USER IF NOT EXISTS '$DB_USER'@'%' IDENTIFIED BY '$DB_PASS';"
+  mysql_admin -e "ALTER USER '$DB_USER'@'%' IDENTIFIED BY '$DB_PASS';"
+  mysql_admin -e "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'%';"
+  mysql_admin -e "FLUSH PRIVILEGES;"
+
+  curl -fsSL https://wordpress.org/latest.tar.gz -o /tmp/wordpress.tar.gz
+  tar -xzf /tmp/wordpress.tar.gz -C /tmp
+  cp -a /tmp/wordpress/. "$HTML_ROOT/"
+  rm -rf /tmp/wordpress /tmp/wordpress.tar.gz
+  rm -f "$HTML_ROOT/index.html"
+
+  SALTS=$(curl -fsSL https://api.wordpress.org/secret-key/1.1/salt/)
+
+  cat > "$HTML_ROOT/wp-config.php" <<WPCONFIG
+<?php
+define( 'DB_NAME', '$DB_NAME' );
+define( 'DB_USER', '$DB_USER' );
+define( 'DB_PASSWORD', '$DB_PASS' );
+define( 'DB_HOST', '$DB_HOST' );
+define( 'DB_CHARSET', 'utf8mb4' );
+define( 'DB_COLLATE', '' );
+
+$SALTS
+
+\$table_prefix = 'wp_';
+
+/* TLS is terminated upstream and the origin is reached over plain HTTP, so PHP
+   sees an insecure request while WordPress knows its site URL is https - which
+   is an infinite redirect on any page that enforces the canonical scheme, such
+   as wp-admin. CloudFront sends CloudFront-Forwarded-Proto; an Application Load
+   Balancer sends X-Forwarded-Proto. Honour both. */
+foreach ( array( 'HTTP_CLOUDFRONT_FORWARDED_PROTO', 'HTTP_X_FORWARDED_PROTO' ) as \$header ) {
+    if ( isset( \$_SERVER[ \$header ] ) && \$_SERVER[ \$header ] === 'https' ) {
+        \$_SERVER['HTTPS'] = 'on';
+        break;
+    }
+}
+
+/* Several instances serve this site. WordPress fires wp-cron.php via loopback
+   on ordinary requests, and its internal lock is advisory, so every instance
+   would run the same scheduled jobs. Cron is driven from one place instead. */
+define( 'DISABLE_WP_CRON', true );
+
+/* The filesystem is shared and immutable from the application's point of view.
+   Updates go through a new image, not through the admin screens. */
+define( 'DISALLOW_FILE_EDIT', true );
+define( 'AUTOMATIC_UPDATER_DISABLED', true );
+
+define( 'WP_DEBUG', false );
+
+if ( ! defined( 'ABSPATH' ) ) {
+    define( 'ABSPATH', __DIR__ . '/' );
+}
+require_once ABSPATH . 'wp-settings.php';
+WPCONFIG
+
+  chmod 640 "$HTML_ROOT/wp-config.php"
+  chown -R 33:33 "$SITE_ROOT"
+  echo "WordPress installed for $DOMAIN"
+done
+
+flock -u 200
+echo "Released bootstrap lock"
+
+# ---------------------------------------------------------------------------
+# 6b. Drive WordPress cron from exactly one instance
+# ---------------------------------------------------------------------------
+# wp-config sets DISABLE_WP_CRON, so nothing runs scheduled jobs by itself any
+# more. This timer runs on every instance, but the lock lives on shared storage
+# and is taken non-blocking, so precisely one instance fires each tick however
+# many are in the group. No extra AWS resources, and it self-heals when an
+# instance is replaced.
+cat > /usr/local/bin/wp-cron-runner.sh <<'CRONRUNNER'
+#!/bin/bash
+set -uo pipefail
+exec 201>/var/www/.wp-cron.lock
+flock -n 201 || exit 0
+for DOMAIN in ${domain_list}; do
+  curl -sS -m 55 -o /dev/null \
+    -H "Host: $DOMAIN" \
+    "http://127.0.0.1:${http_port}/wp-cron.php?doing_wp_cron=$(date +%s)" || true
+done
+CRONRUNNER
+chmod 0755 /usr/local/bin/wp-cron-runner.sh
+
+cat > /etc/systemd/system/wp-cron.service <<'CRONSERVICE'
+[Unit]
+Description=WordPress scheduled tasks
+After=network-online.target var-www.mount
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/wp-cron-runner.sh
+CRONSERVICE
+
+cat > /etc/systemd/system/wp-cron.timer <<'CRONTIMER'
+[Unit]
+Description=Run WordPress scheduled tasks every minute
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=1min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target
+CRONTIMER
+
+systemctl daemon-reload
+systemctl enable --now wp-cron.timer
+
+# ---------------------------------------------------------------------------
+# 6c. Mirror uploads to S3 so CloudFront can serve them without the instance
+# ---------------------------------------------------------------------------
+# WordPress is untouched by this. It keeps writing to wp-content/uploads on
+# shared storage, which stays the source of truth; the bucket is a serving copy.
+# CloudFront prefers the bucket for /wp-content/uploads/* and falls back to this
+# instance for anything not mirrored yet, so the interval below is a performance
+# knob and not a window in which uploads can be lost.
+#
+# Same single-runner election as wp-cron: the lock is on shared storage and taken
+# non-blocking, so one instance syncs however many are running.
+cat > /usr/local/bin/wp-media-sync.sh <<'MEDIASYNC'
+#!/bin/bash
+set -uo pipefail
+
+exec 202>/var/www/.wp-media-sync.lock
+flock -n 202 || exit 0
+
+# Refuse to run against storage that is not mounted.
+#
+# --delete makes the bucket mirror the directory, which is what makes a deletion
+# in WordPress actually remove the file rather than leave it served from the
+# edge forever. It also means an unmounted file system presents an empty
+# directory that sync would faithfully reproduce by emptying the bucket. These
+# two guards turn that from "lose every media file" into "do nothing".
+mountpoint -q /var/www || { echo "shared storage not mounted; refusing to sync"; exit 0; }
+
+while IFS='=' read -r DOMAIN BUCKET; do
+  [ -n "$DOMAIN" ] || continue
+  UPLOADS="/var/www/$DOMAIN/html/wp-content/uploads"
+  [ -d "$UPLOADS" ] || continue
+  [ -n "$(ls -A "$UPLOADS" 2>/dev/null)" ] || continue
+
+  aws s3 sync "$UPLOADS" "s3://$BUCKET/wp-content/uploads"     --delete --only-show-errors --no-progress || true
+done < /etc/wp-media-sync.conf
+MEDIASYNC
+chmod 0755 /usr/local/bin/wp-media-sync.sh
+
+: > /etc/wp-media-sync.conf
+%{ for domain, bucket in media_buckets ~}
+echo "${domain}=${bucket}" >> /etc/wp-media-sync.conf
+%{ endfor ~}
+
+cat > /etc/systemd/system/wp-media-sync.service <<'MEDIASERVICE'
+[Unit]
+Description=Mirror WordPress uploads to S3
+After=network-online.target var-www.mount
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/wp-media-sync.sh
+MEDIASERVICE
+
+cat > /etc/systemd/system/wp-media-sync.timer <<'MEDIATIMER'
+[Unit]
+Description=Mirror WordPress uploads to S3 every ten minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=${media_sync_interval}
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
+MEDIATIMER
+
+systemctl daemon-reload
+systemctl enable --now wp-media-sync.timer
+
+# ---------------------------------------------------------------------------
+# 8. Start serving
+# ---------------------------------------------------------------------------
+mkdir -p /tmp/lshttpd
+
+# A full stop/start, not "lswsctrl restart". Restart is graceful: the old
+# process keeps its listeners while the new one starts, so moving the admin
+# listener from *:7080 to 127.0.0.1:7080 collides with the socket the old
+# process still holds. OpenLiteSpeed treats that as fatal and the new config is
+# silently never applied - the server keeps serving the old one.
+systemctl stop lsws || /usr/local/lsws/bin/lswsctrl stop || true
+sleep 3
+
+# The image starts OpenLiteSpeed at boot under the stock config, which runs as
+# "nobody" and leaves sockets and pid files owned by it in /tmp/lshttpd. Our
+# config runs as www-data, which then cannot lock them: "Failed to lock pid
+# file ... Permission denied", and PHP never starts.
+rm -f /tmp/lshttpd/*.sock /tmp/lshttpd/*.sock.pid
+systemctl start lsws || /usr/local/lsws/bin/lswsctrl start
+
+for attempt in $(seq 1 20); do
+  if curl -fsS -o /dev/null "http://127.0.0.1:$HTTP_PORT/"; then
+    echo "OpenLiteSpeed is answering on port $HTTP_PORT"
+    break
+  fi
+  sleep 3
+done
+
+echo "=== wp-bootstrap finished $(date -Is) ==="
