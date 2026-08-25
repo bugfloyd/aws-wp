@@ -37,7 +37,7 @@ variable "policy_suffix" {
 }
 
 variable "origin_read_timeout" {
-  description = "Seconds CloudFront waits for the origin to respond. 60 is the maximum without a service quota increase"
+  description = "Seconds CloudFront waits for the origin to respond. 120 is the default account quota"
   type        = number
-  default     = 60
+  default     = 120
 }

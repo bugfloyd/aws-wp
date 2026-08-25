@@ -93,6 +93,20 @@ variable "db_skip_final_snapshot" {
   default     = true
 }
 
+variable "php_settings" {
+  description = "php.ini values applied at boot. The image ships PHP's own defaults, which are wrong for WordPress in visible ways - a 2 MB upload cap rejects an ordinary phone photo, and 30 seconds is under half what a large plugin update needs against EFS"
+  type        = map(string)
+
+  default = {
+    memory_limit        = "256M"
+    max_execution_time  = "300"
+    max_input_time      = "300"
+    upload_max_filesize = "64M"
+    post_max_size       = "64M"
+    max_input_vars      = "3000"
+  }
+}
+
 variable "php_children" {
   description = "Ceiling on LSPHP worker processes for the whole server. Children are forked on demand, so idle sites cost nothing - but the ceiling must fit in instance memory at roughly 40-60 MB each, because a burst can reach it"
   type        = number
@@ -145,13 +159,13 @@ variable "alert_email" {
 }
 
 variable "origin_read_timeout" {
-  description = "Seconds CloudFront waits for the origin. Admin actions that rewrite many files on EFS are slow enough to exceed the 30-second default and surface as a 504; 60 is the maximum without a quota increase"
+  description = "Seconds CloudFront waits for the origin. Admin actions that rewrite many files on EFS are slow enough to exceed the 30-second default and surface as a 504. 120 is this account's \"Response timeout per origin\" quota, which is adjustable on request"
   type        = number
-  default     = 60
+  default     = 120
 
   validation {
-    condition     = var.origin_read_timeout >= 1 && var.origin_read_timeout <= 60
-    error_message = "Above 60 seconds CloudFront requires a service quota increase for the origin response timeout."
+    condition     = var.origin_read_timeout >= 1 && var.origin_read_timeout <= 120
+    error_message = "120 seconds is the default service quota for CloudFront's origin response timeout. Higher needs a quota increase request first."
   }
 }
 

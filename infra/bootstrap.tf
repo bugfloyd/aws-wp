@@ -52,6 +52,7 @@ locals {
     http_port       = var.webserver_http_port
     domain_list     = join(" ", [for d in local.domains_list : "\"${d}\""])
     config_bucket   = aws_s3_bucket.config.id
+    php_settings    = var.php_settings
     # Stamped in so a config change produces a new launch template version and
     # therefore a rolling refresh, rather than silently drifting.
     config_revision = md5(join("", [local.httpd_config, local.vhost_config, local.admin_config]))
