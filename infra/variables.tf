@@ -101,3 +101,9 @@ variable "alert_email" {
   description = "Address that CloudWatch alarms notify. AWS sends a confirmation link that must be clicked once before anything is delivered"
   type        = string
 }
+
+variable "enable_edge" {
+  description = "Create the per-domain ACM certificates, CloudFront distributions and DNS records. Set false to build the server without claiming domains a live stack still serves"
+  type        = bool
+  default     = true
+}
