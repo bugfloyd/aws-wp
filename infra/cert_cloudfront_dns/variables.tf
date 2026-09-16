@@ -19,8 +19,8 @@ variable "disable_cache" {
   default     = false
 }
 
-variable "instance_public_dns" {
-  description = "Public DNS name of the web server, used as the CloudFront origin"
+variable "instance_public_ip" {
+  description = "Elastic IP of the web server. Published as origin.<domain>, which CloudFront uses to reach it"
   type        = string
 }
 

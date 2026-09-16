@@ -171,14 +171,20 @@ listener wordpress {
   secure                  0
 %{ for i, domain in domains ~}
 %{ if i == 0 ~}
+  # Every site also answers to origin.<domain>, the name CloudFront reaches the
+  # origin by. It matters on any path that does not forward the viewer's Host
+  # header - which the media path cannot, because S3 reads Host to decide which
+  # bucket a request is for. When CloudFront fails over from a media bucket to
+  # this instance, the request arrives carrying the origin's name, and without a
+  # per-site origin name every site's fallback would land on the catch-all below.
   # The first domain also takes "*", so requests whose Host matches nothing
   # still reach a virtual host. The load balancer's health check addresses the
   # target by IP and cannot send a Host header, so without this catch-all every
   # check gets a 404, every target is marked unhealthy, and the group replaces
   # instances forever.
-  map                     ${domain} ${domain}, www.${domain}, *
+  map                     ${domain} ${domain}, www.${domain}, origin.${domain}, *
 %{ else ~}
-  map                     ${domain} ${domain}, www.${domain}
+  map                     ${domain} ${domain}, www.${domain}, origin.${domain}
 %{ endif ~}
 %{ endfor ~}
 }

@@ -11,7 +11,10 @@ resource "aws_cloudfront_distribution" "cloudfront" {
   is_ipv6_enabled = false
 
   origin {
-    domain_name        = var.instance_public_dns
+    # A per-site name rather than the instance's AWS hostname. On paths that do
+    # not forward the viewer's Host header, this name *is* the Host header the
+    # origin sees, and it has to identify the site. See the origin record below.
+    domain_name        = aws_route53_record.origin.fqdn
     origin_id          = "EC2Origin"
     connection_timeout = 10
 
@@ -228,3 +231,30 @@ resource "aws_route53_record" "www_dns_record" {
   allow_overwrite = true
 }
 
+
+# The name CloudFront reaches the origin by, one per site.
+#
+# Every path through the default behavior forwards the viewer's Host header, so
+# there the origin's own name is only used to find the instance. The media path
+# is different: it cannot forward Host, because its primary origin is S3 and S3
+# reads Host to decide which bucket a request is for. When that path fails over to
+# the instance, the request arrives with this name as its Host - so the name has to
+# say which site it is for.
+#
+# Pointing every site at the instance's AWS hostname looked equivalent and was
+# not: OpenLiteSpeed matched none of them and served the catch-all site, so a
+# not-yet-mirrored upload on one site returned another site's 404 page. A
+# single-site stack cannot show this, because its catch-all is the right site.
+#
+# Publicly resolvable, and harmless: the instance only accepts port 80 from
+# CloudFront's managed prefix list.
+resource "aws_route53_record" "origin" {
+  zone_id = var.hosted_zone_id
+  name    = "origin.${var.domain}"
+  type    = "A"
+  ttl     = 300
+  records = [var.instance_public_ip]
+
+  # A replacement stack claims the same name while the old one still holds it.
+  allow_overwrite = true
+}
