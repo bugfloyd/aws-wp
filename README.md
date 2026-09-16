@@ -1,312 +1,511 @@
 # WordPress on AWS
 
-Terraform configurations for hosting WordPress on AWS with OpenLiteSpeed, built as a
-progression: it starts from the cheapest setup that works and grows, one stage at a time,
-toward the
+Terraform for hosting WordPress on AWS with OpenLiteSpeed, built as a progression: it starts
+from the cheapest setup that works and grows one stage at a time toward the
 [AWS WordPress reference architecture](https://docs.aws.amazon.com/whitepapers/latest/best-practices-wordpress/reference-architecture.html).
 
-Each stage is a git tag with a companion blog post. Check out the tag that matches the post
-you are reading — `main` is always the newest stage and will not match earlier posts.
+Each stage is a git tag with a companion blog post. Check out the tag that matches the post you
+are reading — `main` is always the newest stage and will not match earlier posts.
+
+This README is the reference for the current stage: what is built, why it is built that way, how
+it works, and how to operate, debug and recover it.
+
+## Contents
+
+- [Stages](#stages)
+- [Architecture](#architecture)
+- [Design decisions](#design-decisions)
+- [How it works](#how-it-works)
+- [Operating it](#operating-it)
+- [Logs](#logs)
+- [Alerts](#alerts)
+- [Debugging](#debugging)
+- [Backups and recovery](#backups-and-recovery)
+- [Cost](#cost)
+- [Known gaps](#known-gaps)
+- [Later stages](#later-stages)
+- [Repository layout](#repository-layout)
 
 ## Stages
 
 | Stage | Tag | What it adds | Rough cost | Post |
 | ----- | --- | ------------ | ---------- | ---- |
 | Minimal | [`v1-minimal`](../../tree/v1-minimal) | One EC2 instance in a public subnet, Route 53 A-records straight to its IP, Let's Encrypt on the box. | ~$25/mo | [Beginners Guide: The Most Minimal & Cost-Effective Setup](https://bugfloyd.com/beginners-guide-minimal-wordpress-hosting-aws-terraform-openlitespeed) |
-| Stateless | [`v2-stateless`](../../tree/v2-stateless) | Files move to FSx for OpenZFS, the database to RDS, certificates to ACM behind CloudFront, and media is mirrored to S3. The instance configures itself at boot and holds nothing — destroy it and rebuild and the site is unchanged. Still one instance. | ~$57/mo | _in progress_ |
+| **Stateless** | [`v2-stateless`](../../tree/v2-stateless) | Files move to FSx for OpenZFS, the database to RDS, certificates to ACM behind CloudFront, and media is served from S3. The instance configures itself at boot and holds nothing — destroy it and rebuild and the site is unchanged. Still one instance. | ~$60/mo | _in progress_ |
 | Scalable | _planned_ | Private subnets, a NAT gateway, an application load balancer and an Auto Scaling group. One instance becomes many. | ~$125/mo | _planned_ |
-| Resilient | _planned_ | Removes the single points of failure: instances across both AZs, a NAT gateway per AZ, RDS Multi-AZ, and a Multi-AZ file system. | ~$225/mo | _planned_ |
+| Resilient | _planned_ | Removes the single points of failure: instances across both AZs, a NAT gateway per AZ, RDS Multi-AZ and a Multi-AZ file system. | ~$225/mo | _planned_ |
 | Cached | _planned_ | ElastiCache plus the LiteSpeed Cache plugin. | ~$250/mo | _planned_ |
-| Reference | _planned_ | Aurora with a read replica and a CloudWatch dashboard, completing the AWS reference architecture. | ~$335/mo | _planned_ |
+| Reference | _planned_ | Aurora with a read replica and a CloudWatch dashboard. | ~$335/mo | _planned_ |
 
-Later-stage figures are estimates carried forward from v2's measured cost, not yet built.
+Figures for unbuilt stages are estimates carried forward from this stage's measured cost.
 
 > [!NOTE]
-> **`v2-stateless` runs a single instance, deliberately.** This stage is about removing
-> state from the instance, not about running several of them — so it keeps the previous
-> stage's shape and changes only where files, the database and certificates live. That makes
-> the diff between the two posts exactly the thing being taught. The Scalable stage adds a
-> load balancer and an Auto Scaling group.
+> **The Stateless stage runs a single instance, deliberately.** It is about removing state from
+> the instance, not about running several of them, so it keeps the previous stage's shape. The
+> Scalable stage adds the load balancer and Auto Scaling group.
 
-## Layout
+---
 
-| Directory | Description |
-| --------- | ----------- |
-| [`hostedzones/`](hostedzones/) | Route 53 hosted zones. Deployed separately so domain records outlive the infrastructure. |
-| [`infra/`](infra/) | Networking, compute, file system, media buckets, database, CloudFront, ACM, backups and alerting. |
-
-Both use an S3 backend with native state locking (`use_lockfile`), configured through a
-`backend_config.hcl` that is not committed.
-
-## Shape
+## Architecture
 
 ```
-                  Route 53
-                     |
-          CloudFront + ACM  -- TLS terminates here
-             |           \
-             |            \  /wp-content/uploads/20??/*
-             |             S3 media bucket   --falls back on 403/404-->  instance
-             | everything else, plain HTTP
-   +---------v-----------+   public subnet
-   | t3.micro + EIP      |   port 80 from CloudFront's prefix list only
-   | OpenLiteSpeed/LSPHP |
-   +----+----------+-----+
-        |          |          data subnets, no route off the VPC
-  FSx for OpenZFS  RDS MySQL 8.4
+                         Route 53  (apex and www alias records per site)
+                            |
+                 CloudFront + ACM certificate            TLS terminates here
+                    |                         \
+   everything else  |                          \  /wp-content/uploads/20??/*
+   Host forwarded   |                           \
+                    |                     origin group
+                    |                     1. S3 media bucket (per site)
+                    |                     2. on 403/404/500/502-504: instance
+                    |                            |
+                    v   plain HTTP, port 80      v
+              origin.<domain>  ->  Elastic IP
+   +---------------------------------------------------+   public subnet  10.20.1.0/24
+   | EC2 t3.micro, OpenLiteSpeed + LSPHP 8.3           |   port 80 from CloudFront only
+   | configures itself at boot from user data          |   port 22 from admin_ips
+   | timers: wp-cron 1 min, media sync 10 min          | --> S3 media buckets
+   +----------------+-------------------+---------------+
+                    | NFS 4.2           | MySQL 3306
+   +----------------v------+   +--------v-------------+   data subnets   10.20.21.0/24
+   | FSx for OpenZFS       |   | RDS MySQL 8.4        |                  10.20.22.0/24
+   | /var/www, every site  |   | a database per site  |   no route off the VPC
+   +-----------------------+   +----------------------+
+
+   AWS Backup (FSx, daily)      RDS automated backups     CloudWatch alarms -> SNS -> email
+   Synthetics canary (hourly)   Secrets Manager (DB)      Parameter Store (WebAdmin)
 ```
 
-One `t3.micro` in a public subnet with an **Elastic IP**, CloudFront and ACM in front. No
-load balancer, no NAT gateway, no Auto Scaling group — the instance reaches the internet
-through the internet gateway directly, and a security group locked to CloudFront's managed
-prefix list is what keeps it unreachable to everyone else.
+### What serves a request
 
-The Elastic IP is not cosmetic: CloudFront needs an origin that survives the instance being
-replaced, and without one the rebuild this stage makes possible would silently point every
-distribution at nothing.
+**A page, an admin screen, anything dynamic** goes through CloudFront's default behavior to the
+instance. The viewer's `Host` header, all cookies and all query strings are forwarded, so
+OpenLiteSpeed picks the right site and WordPress sees the request as sent.
 
-**The VPC uses private address space**, `10.20.0.0/16` by default, with its subnets carved
-from `vpc_cidr`. A publicly routable range looks harmless until a plugin calls an API hosted
-inside it: that traffic is routed locally and never leaves the VPC. The range is fixed for the
-life of a VPC, so it is worth getting right before the first apply.
+What CloudFront keeps depends on the response's own headers:
 
-## Storage
+| Response | Cached at the edge for |
+| -------- | ---------------------- |
+| Admin screens, `wp-login.php`, 404s, anything for a logged-in user (WordPress sends `no-cache`) | not cached |
+| Images, CSS, JavaScript and fonts from the instance (OpenLiteSpeed sends `max-age=604800`) | 7 days |
+| Public pages and feeds (WordPress sends no cache headers) | 24 hours, the policy's default |
+| Year-folder media from S3 (no cache headers, AWS managed CachingOptimized policy) | 24 hours |
 
-Three kinds of state used to live on the instance: **files**, the **database**, and
-**certificates**. This stage moves all three off — to FSx for OpenZFS, to RDS, and to ACM
-behind CloudFront.
+**A published or edited post can take up to a day to appear to visitors** unless the cache is
+invalidated (see [Debugging](#debugging)). Query strings are part of the cache key, so theme and
+plugin assets versioned with `?ver=` change as soon as the version does. Cookies are not part of
+the key: a logged-in user can be served the cached public copy of a page, without the admin bar.
 
-### Files: FSx for OpenZFS
+**WordPress media** — anything under `/wp-content/uploads/20??/` — goes to an origin group. The
+site's S3 bucket answers first; if it does not have the file yet, CloudFront retries the same
+request against the instance. A timer copies media into the bucket every ten minutes, so a new
+image is served by the instance for a few minutes and by S3 from then on.
 
-The whole WordPress document root, uploads included, lives on an FSx for OpenZFS file system
-mounted at `/var/www` over NFS 4.2.
+**Everything else under `/wp-content/uploads/`** — plugin-generated CSS, fonts, form uploads —
+takes the default behavior like any other request, served fresh from the file system.
 
-**Why not EFS.** Both are managed NFS, and the difference is what a single file operation
-costs. EFS is serverless and bills per GB with no floor, but every call crosses a shared
-distributed service. A WordPress document root is unusually operation-heavy: a plugin update
-deletes one directory and unpacks another, file by file.
+### Components
+
+| Component | Name | Defined in |
+| --------- | ---- | ---------- |
+| VPC, one public and two data subnets, internet gateway, route tables | `vpc_cidr` (default `10.20.0.0/16`) | `network_*.tf` |
+| Web instance, Elastic IP, key pair, security group | tag `WebserverInstance`, key `<stack_name>-key` | `webserver.tf`, `webserver_network.tf` |
+| Instance role, profile and policies | `<stack_name>-ec2-role`, `-instance-profile`, `-bootstrap-policy`, `-media-sync` | `instance_iam.tf`, `media.tf` |
+| File system | FSx for OpenZFS, security group `<stack_name>-fsx` | `fsx.tf` |
+| Database, subnet group, parameter group | `<stack_name>-mysql`, `-db-subnet-group`, `-mysql84` | `database.tf` |
+| Rendered OpenLiteSpeed config | S3 bucket `config_bucket_name`, prefix `ols/` | `config_bucket.tf`, `bootstrap.tf` |
+| WebAdmin password | Parameter Store `/<stack_name>/ols/admin-password` | `bootstrap.tf` |
+| Media buckets, origin access control | `<stack_name>-<domain, dots as hyphens>-media`, `<stack_name>-media<edge_policy_suffix>` | `media.tf` |
+| Certificates, distributions, DNS records, cache policies | per domain | `cert_cloudfront_dns/` |
+| CloudFront logs and canary artifacts | S3 bucket `cloudfront_logging_bucket_name` | `logging_bucket.tf` |
+| Backups | vault `<stack_name>-backup-vault`, plan `<stack_name>-daily`, role `<stack_name>-backup-role` | `backup.tf` |
+| Alarms, SNS topic | `<stack_name>-*`, topic `<stack_name>-alerts` | `alerts.tf`, `fsx.tf`, `canary.tf` |
+| Synthetics canary | `<stack_name>-origin` | `canary.tf`, `canary_iam.tf` |
+| Hosted zones | one per domain | `hostedzones/` (separate state) |
+
+---
+
+## Design decisions
+
+### Shape
+
+**One instance.** The stage is about removing state, not adding capacity. Keeping the previous
+stage's shape means the difference between the two is exactly the thing being taught.
+
+**A public subnet and no NAT gateway.** The instance reaches the internet through the internet
+gateway directly. A private subnet would need a NAT gateway at roughly $37 a month to solve a
+problem this stage does not have.
+
+**An Elastic IP.** CloudFront needs an origin that survives the instance being replaced; without
+one, a rebuild points every distribution at nothing.
+
+**Private address space.** The VPC defaults to `10.20.0.0/16`, with subnets carved from
+`vpc_cidr`. A publicly routable range — this project once used `20.0.0.0/16`, which belongs to
+Microsoft — silently breaks any request to a real address inside it, because the VPC routes it
+locally. A VPC's range cannot change without replacing it.
+
+**Data subnets with no route off the VPC.** RDS and the file system only need local traffic. RDS
+requires a subnet group spanning two Availability Zones even for a single-AZ instance, which is
+why the data subnets come as a pair.
+
+### Edge
+
+**TLS terminates at CloudFront with an ACM certificate** (apex plus `www`, DNS-validated), and the
+origin is plain HTTP. Certificates are state: a renewal job on a disposable instance is a failure
+waiting to happen, and ACM renews by itself. Minimum TLS 1.2, SNI only, HTTP/2, IPv4 only,
+viewers redirected to HTTPS.
+
+**The origin is locked by security group, not a shared secret.** Port 80 accepts only
+`com.amazonaws.global.cloudfront.origin-facing`, AWS's managed prefix list. The instance is
+publicly routable and not publicly reachable.
+
+**The default behavior caches whatever WordPress allows.** Its cache policy keys on `Host`,
+`Options` and all query strings, never cookies; TTL 0 / 1 day / 1 year (min / default / max);
+gzip and Brotli. Its origin request policy forwards all viewer headers, all cookies, all query
+strings and the CloudFront viewer headers. WordPress's own `no-cache` on admin and logged-in
+responses keeps those out of the cache; everything else is cached, which is what keeps one
+small instance enough.
+
+**CloudFront reaches the instance as `origin.<domain>`**, a per-site A record for the Elastic IP,
+and OpenLiteSpeed lists that name for its site. The media behavior cannot forward the viewer's
+`Host` — S3 reads `Host` to decide which bucket a request is for — so when it falls back to the
+instance, the origin's own name is the `Host` the instance receives. With one shared origin name,
+every site's fallback lands on the catch-all site. A single-site stack cannot show this.
+
+**Origin read timeout is 120 seconds** rather than the default 30: this account's "Response
+timeout per origin" quota, which AWS raises on request. An admin action that rewrites thousands of
+files on network storage — a large plugin update — needs the room.
+
+**The edge can be switched off.** `enable_edge = false` builds everything except certificates,
+distributions and DNS. A CloudFront alternate domain name belongs to one distribution at a time,
+account-wide, so a replacement stack is built and verified this way and gets its edge at cutover.
+
+### Storage
+
+**FSx for OpenZFS, not EFS.** A WordPress document root is tens of thousands of small files, and
+on network storage every file operation is a round trip. What matters is the cost of one
+operation, not throughput.
 
 | | EFS | FSx for OpenZFS |
 | --- | --- | --- |
-| File creations, measured | 133/sec | ~500/sec |
+| File creations, measured on this workload | 133/sec | ~500/sec |
 | 5,872-file WooCommerce install | ~90 s | 39 s |
-| Sizing | automatic | provisioned — and it can fill up |
-| Cost | $0.30/GB, no floor | **$24.64/month floor**, then $0.099/GB |
+| Sizing | automatic | provisioned, and it can fill up |
+| Cost | $0.30/GB, no floor | $24.64/month floor, then $0.099/GB |
 | Availability | multi-AZ | Single-AZ here |
 
-**FSx buys speed, not savings.** Its floor is a fixed charge for provisioned capacity, so it
-falls per site as sites are added — but EFS has no floor at all, and stays cheaper until total
-data passes roughly 82 GB. Single-AZ is acceptable while the instance is itself in one zone;
-the Resilient stage needs Multi-AZ, at $75.55/month.
+FSx buys speed, not savings: EFS stays cheaper until total data passes roughly 82 GB. The file
+system is `SINGLE_AZ_1` — `SINGLE_AZ_2` starts at 160 MB/s of throughput, well over twice the
+cost — with 64 GiB of SSD, 64 MB/s, ZSTD compression and encryption at rest. Multi-AZ is
+$75.55/month and belongs to the Resilient stage.
 
-Two things about the mount look removable and are not:
+**Mounted at `:/fsx` over NFS 4.2, without `noresvport`.** FSx exports the root volume at `/fsx`,
+not `/`. Its exports default to `secure`, requiring a privileged source port, and `noresvport` —
+which EFS documentation recommends — asks for the opposite; the mount then fails with
+`Operation not permitted`, which reads like a permissions fault and is not. The export admits the
+VPC's range with `rw`, `crossmnt` and `no_root_squash`, so the bootstrap can set ownership.
 
-- **No `noresvport`**, which EFS documentation recommends. FSx exports default to `secure`,
-  requiring a privileged source port, and asking for the opposite fails with
-  `Operation not permitted` — which reads like an export or security-group fault and is
-  neither.
-- **The root volume is exported at `/fsx`**, not at `/`.
+**Media is served from S3 with the instance as fallback, and nothing is installed inside
+WordPress.** WordPress writes uploads to the file system, which stays the source of truth. This
+takes cold media requests off the web tier — a large library is cold at most edge locations most
+of the time — and keeps media available while the instance is replaced. Because the instance
+answers anything the bucket lacks, the sync interval is a performance knob, never a data-loss
+window.
 
-### Media: mirrored to S3, served with a fallback
+**Only year folders go to S3.** WordPress keeps its own media in `uploads/YYYY/MM/` and never
+edits a file in place. Plugins also write under `uploads`, and some regenerate a file under the
+same name with a `?ver=` query string to bust caches — Elementor's `elementor/css/post-6.css`, for
+one. The media behavior's cache policy (AWS managed CachingOptimized) ignores query strings, and
+the bucket would hold a stale copy until the next sync. So the CloudFront path pattern
+(`/wp-content/uploads/20??/*`) and the sync filter (`20[0-9][0-9]/*`) match each other and nothing
+else; plugin files never reach a bucket.
 
-WordPress is untouched — no offload plugin, no stream wrapper. It keeps writing uploads to
-`wp-content/uploads` on the file system, which stays the source of truth. A systemd timer
-mirrors each site's **media** to its own S3 bucket every ten minutes, and CloudFront serves
-`/wp-content/uploads/20??/*` from an **origin group**: the bucket first, the instance if the
-bucket does not have the file yet.
+**The failover criteria include 403.** Each bucket's policy grants CloudFront `s3:GetObject` and
+not `s3:ListBucket`, and S3 will not confirm to such a caller whether a key exists: a missing
+object is `AccessDenied`. A criteria list of `[404]` never fails over. The criteria are
+403, 404, 500, 502, 503 and 504.
 
-**Only the year folders, where WordPress keeps its own media.** Plugins write under
-`wp-content/uploads` too, and some regenerate a file in place under the same name: Elementor
-rewrites `elementor/css/post-6.css` and links it as `post-6.css?ver=<timestamp>`. Routed to the
-bucket, that file would be stale until the next sync and then cached under a policy that
-ignores query strings — an edited page keeping its old styles for a day. So everything outside
-the year folders goes through the default behavior instead: fresh from the file system, query
-strings in the cache key, and never copied into a bucket. The sync filter and the CloudFront
-path pattern have to match.
+**One media bucket per site per environment**, named `<stack_name>-<domain>-media` with the
+domain's dots as hyphens (`wp-prod-naz-li-media`): private,
+SSE-S3, incomplete multipart uploads aborted after seven days. A staging stack pointed at a
+production bucket would delete production media on its first sync, which is why the stack name
+is part of the bucket name.
 
-So the sync interval is a performance knob, not a data-loss window. An image uploaded a
-minute ago is served by the instance; once mirrored, it is served by S3 and never reaches the
-web tier again.
+**Rejected alternatives.** An offload plugin (WP Offload Media and similar) puts behavior inside
+every WordPress install, and "remove local copies" breaks anything that reads media back from PHP.
+Mounting a bucket (s3fs, rclone, Mountpoint for S3) fails on semantics — S3 has no rename, partial
+writes or POSIX locks, all of which WordPress and this stack use — and routes every media miss
+through the instance anyway. A self-managed NFS server adds a component to patch and a single point
+of failure. EBS attaches to one instance, and Multi-Attach needs a cluster file system.
 
-Details that decide whether this works:
+### Database
 
-- **The failover criteria must include 403, not only 404.** The bucket policy grants
-  CloudFront `s3:GetObject` and not `s3:ListBucket`, so S3 answers a missing key with
-  `AccessDenied`. A criteria list of `[404]` reads sensibly and never fails over.
-- **CloudFront reaches the instance as `origin.<domain>`**, a per-site record for the Elastic
-  IP, and OpenLiteSpeed maps that name to its site. The media path cannot forward the viewer's
-  `Host` header, because S3 reads `Host` to choose the bucket — so when it falls back to the
-  instance, the origin's own name is the `Host` the instance sees. With a single shared origin
-  name, every site's fallback lands on the catch-all virtual host and serves the wrong site. A
-  one-site stack cannot show this, because its catch-all is the right site.
-- **`sync --delete`, guarded.** Without `--delete`, media deleted in WordPress stays served from
-  the edge. With it, an unmounted file system looks like an empty directory and would empty
-  the bucket — so the timer refuses to run unless the mount is present.
-- **One bucket per site per environment**, named `<stack_name>-<domain>-media`. A staging site
-  pointed at a production bucket would delete production media on its first sync.
+**RDS MySQL 8.4** on `db.t4g.micro`, gp3, 20 GB autoscaling to 100 GB, encrypted, single-AZ, not
+publicly accessible, reachable on 3306 only from the web security group. MySQL rather than MariaDB
+so a later move to Aurora is an engine swap. Performance Insights needs `db.t4g.small` or larger.
 
-### Database: RDS
+**RDS owns the master password** (`manage_master_user_password`): it lives in Secrets Manager, is
+rotated by RDS, and never appears in Terraform state. There is no `db_name`: the bootstrap creates
+one database and one user per site, so the site list is not baked into the database.
 
-MySQL 8.4 on `db.t4g.micro`, in data subnets with no route off the VPC. RDS owns the master
-secret in Secrets Manager; the bootstrap creates one database and user per site.
+**Parameter group** `<stack_name>-mysql84`: `utf8mb4` and `utf8mb4_unicode_ci`, and
+`log_bin_trust_function_creators = 1`. Automated backups enable binary logging, and without that
+parameter any plugin creating a stored function fails with ERROR 1419.
 
-`db_snapshot_identifier` creates the database from a snapshot instead of empty, which is how
-a replacement stack takes over an existing one's data. Per-site users and passwords live in
-the database, so they arrive intact.
+**`db_engine_version` is a variable, and Extended Support is refused at creation.** A MySQL version
+past its RDS end of standard support is enrolled in Extended Support automatically and billed per
+vCPU-hour — measured on this account at $0.118, which is $172 a month on a `db.t4g.micro` whose own
+cost is $13. `engine_lifecycle_support = "open-source-rds-extended-support-disabled"` makes AWS
+upgrade the engine at end of support instead. RDS accepts that setting only at creation or
+snapshot restore, so it is ignored afterwards; the real protection on a running database is
+upgrading before the deadline.
 
-### Backups
+**Minor versions upgrade automatically** in the maintenance window, Sundays 03:30–04:30 UTC, which
+is also when a brief database restart is expected. Automated backups run daily in 02:00–03:00 UTC.
 
-RDS automated backups with 30-day retention, and AWS Backup for the file system on a daily
-plan with 30-day retention.
+**`db_snapshot_identifier` creates the database from a snapshot** rather than empty — how a
+replacement stack takes over data, with per-site users and passwords intact. It is ignored once the
+database exists.
 
-## Sizing
+**The defaults are for stacks built to be torn down.** `db_deletion_protection` defaults to
+`false`, `db_skip_final_snapshot` to `true` and `db_apply_immediately` to `true`. Anything serving
+real traffic should set the first two the other way.
 
-One `t3.micro` — 2 vCPU, 1 GiB, and a 1 GB swapfile. Serving three sites it sits around
-420–440 MB of 909 MB with swap untouched. Instance type and worker count are both variables.
+### Instance
 
-**`php_children` is a ceiling, not an allocation.** LSAPI forks workers on demand, so idle
-sites cost nothing. But the ceiling has to fit in memory when a burst reaches it, and the
-number that matters is the *incremental* cost of a worker, not its RSS: workers fork from a
-common parent and share most of their pages. Each adds about **26 MB PSS** while showing
-95 MB RSS — so sizing from `ps` overstates the cost roughly threefold.
+**Immutable configuration.** Nothing is configured by hand. Every virtual host, PHP setting and
+timer is rendered from Terraform values at boot, and `user_data_replace_on_change` replaces the
+instance when any of it changes, rather than leaving a running box configured by a script it no
+longer matches.
 
-Budget from the baseline instead: the OS, OpenLiteSpeed and the SSM agent occupy around
-450 MB. The swapfile covers the tail — PHP's `memory_limit` is 256 MB, and a handful of
-simultaneously heavy requests can each grow far past the average. Raise the instance type
-before raising `php_children`.
+**User data is gzipped.** EC2 caps user data at 16 KB and the bootstrap script passed it;
+cloud-init decompresses it (17 KB becomes about 7). The OpenLiteSpeed configs live in the config
+bucket instead, with a hash of their contents stamped into the user data, so changing a config
+still replaces the instance.
 
-There is no Auto Scaling group at this stage and no load balancer health check, so nothing
-*acts* when the site stops responding. A Synthetics canary covers the noticing; the Scalable
-stage adds the acting, by putting a load balancer in front that can replace a failed instance
-rather than merely report it.
+**The bootstrap never reinstalls or reconfigures a site that already has a `wp-config.php`**; it
+only fixes ownership if it has drifted. That is what lets a migrated or restored site keep its own
+credentials and table prefix. It also means a change to the generated config reaches only sites
+installed after it.
 
-## How an instance configures itself
+**WebAdmin listens on `127.0.0.1:7080` only**, with a password generated by Terraform and held in
+Parameter Store. The image ships a password hash nobody knows the plaintext of; the bootstrap
+replaces it. Changes made through the console are lost on the next replacement — it exists to
+inspect live state.
 
-The AMI is a bare OpenLiteSpeed install — no virtual host, no domain mapping, no WordPress.
-Everything that makes an instance serve a site happens at first boot:
+**Session Manager, with SSH as a fallback.** The SSM agent is baked into the image and needs no
+inbound rule. SSH on port 22 is open only to `admin_ips`, for when the agent itself is what is
+broken.
 
-1. Mount the file system at `/var/www`
-2. Write PHP settings, and install WP-CLI
-3. Read the database credentials from Secrets Manager and the WebAdmin password from
+**One PHP pool for the whole server.** A pool per virtual host multiplies workers — and database
+connections, which a `db.t4g.micro` caps at about 85 — by the number of sites. `php_children`
+(default 15) is a ceiling, not an allocation: LSAPI forks on demand. Each worker adds about 26 MB of
+shared memory, although `ps` reports around 95 MB, so size from the baseline — roughly 450 MB for
+the OS, OpenLiteSpeed and the SSM agent — rather than from `ps`. Three sites run at about 420–440 MB
+of a `t3.micro`'s 909.
+
+**A 1 GB swapfile**, with `vm.swappiness = 10`. PHP's `memory_limit` is 256 MB, so a few heavy
+requests at once can each grow far past the average; swap turns that from an out-of-memory kill
+into a slow request.
+
+**PHP settings are a drop-in**, written to the PHP scan directory as `zz-wordpress.ini`, which
+sorts last and cannot be overridden by the image's `opcache.ini`. Defaults (`php_settings`):
+`memory_limit 256M`, `max_execution_time 300`, `max_input_time 300`, `upload_max_filesize 64M`,
+`post_max_size 64M`, `max_input_vars 3000`. The image's own defaults — a 2 MB upload cap and a
+30-second limit — reject ordinary photos and large plugin updates.
+
+**OPcache is tuned for a network file system.** Revalidation `stat()`s every cached file, a round
+trip each on NFS, so `opcache.revalidate_freq` is 900 seconds rather than 2, with 160 MB of cache
+for 20,000 files. WordPress calls `opcache_invalidate()` on files it writes during updates, so its
+own changes apply at once. **Files changed any other way — editing `wp-config.php` by hand — can
+keep running their old version for up to fifteen minutes.**
+
+**WP-CLI is installed**, with a `wp-site <domain> <args>` wrapper that runs it as the web user. It
+has no timeout, which the admin panel does.
+
+### Naming
+
+Every resource whose name must be unique beyond the VPC is prefixed with `stack_name`, so a second
+stack in the same account — staging, or a replacement for production — is one variable away.
+
+| Name unique across | Resources | Handled by |
+| ------------------ | --------- | ---------- |
+| The account | IAM roles, policies, instance profile; CloudFront cache and origin request policies; the origin access control | `stack_name`, plus `edge_policy_suffix` for the CloudFront policies |
+| The region | RDS instance, subnet and parameter groups; SNS topic; alarms; backup vault and plan; SSM parameter; key pair; canary | `stack_name` |
+| The VPC | security groups | nothing needed — every stack builds its own VPC |
+| All of AWS | S3 buckets | media buckets embed the domain; the config and log bucket names are variables |
+
+**`edge_policy_suffix`** exists because a stack being replaced keeps its CloudFront policies until
+its distributions are deleted, so two generations of the same stack need different policy names.
+
+**Suffix explicit bucket names with the account ID.** A generic name can answer 404 to
+`head-bucket` and still fail creation with `BucketAlreadyExists`.
+
+### Versions
+
+Terraform ≥ 1.10 (the release that added `use_lockfile`, the S3 backend's native locking, used
+instead of a DynamoDB table), AWS provider 6.x, MySQL 8.4, Synthetics runtime
+`syn-nodejs-puppeteer-17.0`. The runtime is pinned because AWS deprecates runtimes on a schedule.
+
+---
+
+## How it works
+
+### Boot sequence
+
+Everything below runs from `infra/templates/bootstrap.sh.tftpl`, logged to
+`/var/log/wp-bootstrap.log`. It is idempotent.
+
+1. **Trim attack surface** — disable `rpcbind`, which `nfs-common` pulls in and NFS 4 does not use
+2. **Swap** — create and enable `/swapfile` (1 GB), set `vm.swappiness = 10`
+3. **Mount the file system** at `/var/www` via `/etc/fstab`, retrying for up to five minutes; exit
+   with `FATAL` if it never mounts
+4. **Credentials** — read the RDS master secret from Secrets Manager and the WebAdmin password from
    Parameter Store
-4. Fetch the rendered OpenLiteSpeed configuration from S3 and install it
-5. Under a lock held on shared storage, create the database and install WordPress for any
-   domain that does not have it yet — and **leave alone any site that already has a
-   `wp-config.php`**
-6. Start the WP-Cron and media-sync timers, and OpenLiteSpeed
+5. **WebAdmin** — write the password hash, fetch `ols/admin_config.conf` from the config bucket
+6. **Server configuration** — fetch `ols/httpd_config.conf` and the virtual host template, write
+   the PHP drop-in, install WP-CLI and `wp-site`
+7. **Per-site setup**, holding `/var/www/.bootstrap.lock` (waits up to ten minutes). For each
+   domain: render its virtual host config and create its `html` and `logs` directories. If it has
+   a `wp-config.php`, correct ownership only if wrong and move on. Otherwise put up a placeholder
+   page, create its database and user, install the latest WordPress, and write `wp-config.php`
+8. **WP-Cron** — install the runner and its one-minute timer
+9. **Media sync** — install the script, its site-to-bucket map and its timer
+10. **Start serving** — full stop of OpenLiteSpeed, clear stale sockets, start, and poll
+    `http://127.0.0.1/` for up to 60 seconds
 
-Configuration changes go through a rebuild rather than through a console. The rendered
-OpenLiteSpeed config lives in S3 and its content hash is stamped into the instance's user
-data, so changing it replaces the instance instead of leaving a running box configured by a
-script it no longer matches. The bootstrap is gzipped into user data, having passed EC2's
-16 KB limit; cloud-init decompresses it.
+A few details decide whether that works. The stop is a full stop and start, not
+`lswsctrl restart`, which is graceful: the old process keeps its listeners, moving the admin
+listener to loopback collides with the socket it still holds, and OpenLiteSpeed keeps the old
+configuration without saying so. The stale sockets matter because the image starts OpenLiteSpeed
+at boot as `nobody`, and the real configuration runs as `www-data`, which cannot lock them.
 
-TLS is terminated at CloudFront with an ACM certificate and the origin is reached over plain
-HTTP, so there is no certificate on the instance and nothing to renew.
+Step 10 never fails the boot. The log ends `OpenLiteSpeed is answering on port 80` when the first
+site answered; without that line, the `curl:` errors before `wp-bootstrap finished` say why.
 
-**PHP settings are a scan-directory drop-in**, not edits to `php.ini`. The image ships PHP's
-own defaults — a 2 MB upload cap and a 30-second execution limit, both wrong for WordPress —
-and a drop-in sorting last is the only place a value cannot be silently overridden.
+### On the instance
 
-**OPcache matters more on a network file system.** Without it every request re-reads PHP
-source over NFS. `opcache.revalidate_freq` is 900 rather than 2, because revalidation
-`stat()`s every cached file and each one is a round trip. WordPress calls
-`opcache_invalidate()` on files it writes during updates, so its own changes apply at once.
-**Changes made outside WordPress do not** — editing `wp-config.php` by hand can leave the old
-version running for up to fifteen minutes. Restart OpenLiteSpeed after any such edit.
+| Path | What |
+| ---- | ---- |
+| `/var/www/` | the FSx mount — every site, on shared storage |
+| `/var/www/<domain>/html/` | the WordPress install, document root |
+| `/var/www/<domain>/logs/` | that site's access and error logs |
+| `/var/www/.bootstrap.lock`, `.wp-cron.lock`, `.wp-media-sync.lock` | locks electing a single runner |
+| `/usr/local/lsws/conf/httpd_config.conf` | server config, fetched at boot |
+| `/usr/local/lsws/conf/vhosts/<domain>/vhconf.conf` | per-site config, rendered at boot |
+| `/usr/local/lsws/admin/conf/admin_config.conf` | WebAdmin config |
+| `/usr/local/lsws/lsphp83/etc/php/8.3/mods-available/zz-wordpress.ini` | PHP settings |
+| `/usr/local/bin/wp`, `/usr/local/bin/wp-site` | WP-CLI and its wrapper |
+| `/usr/local/bin/wp-cron-runner.sh`, `wp-media-sync.sh` | the two scheduled jobs |
+| `/etc/wp-media-sync.conf` | `domain=bucket`, one per line |
+| `/etc/systemd/system/wp-cron.{service,timer}`, `wp-media-sync.{service,timer}` | their units |
 
-**Large plugin updates through the admin panel** are bounded by CloudFront's origin timeout,
-raised to 120 seconds — this account's quota. WP-CLI over Session Manager has no such ceiling:
+Only `/var/www` survives a replacement. Everything else is rebuilt.
 
-```sh
-wp-site <domain> plugin update <slug>
-```
+### A site
 
-## Naming
+**Database naming.** For a site installed by the bootstrap, the database is the domain with dots
+and hyphens replaced by underscores (`bugfloyd_com`), and the user is `wp_` followed by the first
+twelve characters of `echo <domain> | md5sum`. The password is random and lives only in that
+site's `wp-config.php`.
 
-Every resource whose name has to be unique somewhere is prefixed with `stack_name`, so a
-second stack in the same account is one variable away. What the prefix is worth depends on
-how wide that uniqueness scope is:
+**The generated `wp-config.php`** sets the database connection, fresh salts, table prefix `wp_`,
+and four things this stack depends on:
 
-| Scope | Resources | Collides with |
-| ----- | --------- | ------------- |
-| The account | IAM roles, policies and instance profiles; CloudFront cache and origin request policies; the origin access control | any stack you own, anywhere |
-| The region | RDS instance, subnet and parameter groups; SNS; CloudWatch alarms; AWS Backup vault and plan; the SSM parameter; the EC2 key pair; the canary | any stack in the same region |
-| The VPC | security groups | nothing — each stack builds its own VPC |
-| Globally | the per-site media buckets (derived); the config and CloudFront log buckets (explicit) | every AWS customer |
+- **A protocol shim.** TLS ends at CloudFront, so PHP sees plain HTTP while WordPress's site URL is
+  `https` — an infinite redirect on any page that enforces the canonical scheme, which is
+  `wp-admin` and not the front page. The shim sets `HTTPS=on` when `CloudFront-Forwarded-Proto`
+  (or a load balancer's `X-Forwarded-Proto`) says `https`.
+- **`DISABLE_WP_CRON`** — a timer drives cron instead.
+- **`DISALLOW_FILE_EDIT`** — no theme and plugin code editor in the admin screens.
+- **`AUTOMATIC_UPDATER_DISABLED`** — no unattended background updates.
 
-Security groups are deliberately left unprefixed: their names are unique per VPC and every
-stack brings its own.
+Sites brought in from elsewhere keep whatever `wp-config.php` they arrived with, including their
+own table prefix.
 
-**Global bucket names are a lottery for generic words.** `head-bucket` answering 404 does not
-mean a name can be created — names another account holds can still come back
-`BucketAlreadyExists`. The media buckets embed the domain, which makes them effectively
-unique; for the two explicit buckets, a suffix of the account ID is the reliable choice.
+**Virtual host.** Each site answers to `<domain>`, `www.<domain>` and `origin.<domain>`; the first
+site in the list also takes `*`, so a request matching nothing still reaches a site. Document root
+`/var/www/<domain>/html`, `.htaccess` rewrite rules honoured, gzip and Brotli on.
 
-**`edge_policy_suffix`** stays separate from `stack_name` because CloudFront policy names are
-unique account-wide *and* a stack being replaced keeps its policies until its distributions
-are deleted. It is the one name that must differ between two generations of the same stack.
+### Scheduled jobs
 
-## Versions
+**WP-Cron**, every minute, starting three minutes after boot. Takes `/var/www/.wp-cron.lock`
+non-blocking, then requests `wp-cron.php` for each site over `127.0.0.1` with the site's `Host`.
+With more than one instance, exactly one runs each tick. Those requests appear in every site's
+access log once a minute, from `127.0.0.1`.
 
-Terraform, the AWS provider and the managed-service engines all track the current stable
-release rather than whatever worked when this was written. Currently: **AWS provider 6.x**,
-MySQL **8.4**, Synthetics runtime **syn-nodejs-puppeteer-17.0**.
-
-The Terraform floor stays at **1.10** deliberately — that is the release that added
-`use_lockfile`, the S3 backend's native state locking, which this project relies on instead
-of the deprecated DynamoDB table.
-
-For RDS, tracking the current version is not cosmetic:
-
-**A database left on a version past its RDS end of standard support is enrolled in Extended
-Support automatically, and billed per vCPU-hour.** Measured on this account, that is
-$0.118/vCPU-hour — **$172/month on a two-vCPU `db.t4g.micro` whose own instance cost is
-$13**. Nothing about the database looks different; the first sign is the bill.
-
-So `db_engine_version` is a variable, and databases are created with
-`engine_lifecycle_support = "open-source-rds-extended-support-disabled"`. That trade is
-deliberate: when support ends, AWS performs the major upgrade itself during a maintenance
-window instead of quietly charging to keep the old version running.
-
-**That setting only works at creation** — and a restore from snapshot counts. RDS offers no
-way to modify it on an existing database, so Terraform can report the change as applied while
-RDS keeps the old value. A database that missed it can be fixed by restoring a snapshot into
-a new instance.
-
-## Related projects
-
-- [bugfloyd/aws-ols-mariadb-ami](https://github.com/bugfloyd/aws-ols-mariadb-ami) — Packer
-  and Ansible build for the AMI. Build it with `-var profile=web` for this project; the
-  `standalone` profile builds the self-contained image the AMI blog post describes.
-- [bugfloyd/ols-wp-backup](https://github.com/bugfloyd/ols-wp-backup) — server-level backup
-  scripts, used by the `standalone` AMI profile. From the Stateless stage onward backups are
-  handled by RDS automated backups and AWS Backup instead.
-
-## Prerequisites
-
-- An AWS account and the AWS CLI configured
-- [Terraform](https://developer.hashicorp.com/terraform/downloads) >= 1.10
-- A registered domain delegated to Route 53
-- An AMI built from `aws-ols-mariadb-ami` with `profile=web`
-
-## Deploying
-
-Set your AWS profile:
+**Media sync**, every `media_sync_interval` (default ten minutes), starting three minutes after
+boot. Takes `/var/www/.wp-media-sync.lock` non-blocking and exits unless `/var/www` is mounted.
+For each site with a non-empty uploads directory:
 
 ```sh
-export AWS_PROFILE=<AWS_PROFILE>
+aws s3 sync /var/www/<domain>/html/wp-content/uploads s3://<bucket>/wp-content/uploads \
+  --exclude '*' --include '20[0-9][0-9]/*' --delete --only-show-errors --no-progress
 ```
 
-Create `backend_config.hcl` in both directories, pointing at an S3 bucket you own:
+It copies a file that is new, differs in size, or is newer at the source; `--size-only` would miss
+a same-size re-save. `--delete` removes files deleted in WordPress, and honours the filter, so it
+never touches keys outside the year folders. The mount check matters: an unmounted file system
+looks like an empty directory, and `--delete` would mirror that by emptying the bucket. In the
+template the command is one line on purpose — a shell continuation followed by a blank line ends
+the command early without an error, and the sync then runs with no filter and no `--delete`.
+
+### What looks removable and is not
+
+- **`CGIRLimit` in the server config.** Without it OpenLiteSpeed launches PHP through its suEXEC
+  helper, and this build ships no `lscgid` binary: every PHP request returns 503.
+- **`create_before_destroy` on the instance role and profile.** Renaming replaces them, and AWS
+  refuses to delete a profile still attached to a running instance.
+- **`ignore_changes` on `engine_lifecycle_support` and `snapshot_identifier`.** Both are
+  creation-only; without it, the first would show a change forever and the second would read as
+  "replace this database with an empty one".
+- **Metric math on the FSx storage alarm.** `StorageCapacityUtilization` does not exist for
+  OpenZFS; an alarm on it sits in OK forever. FSx publishes `StorageCapacity` and
+  `UsedStorageCapacity` in bytes.
+- **The conditional ownership check.** A recursive `chown` over NFS is a round trip per file; run
+  on every boot it held a replacement's bootstrap for minutes.
+- **`depends_on` from the log bucket's ACL to its ownership controls.** Buckets default to
+  `BucketOwnerEnforced`, which rejects ACLs, and CloudFront's standard logging needs the
+  `log-delivery-write` ACL.
+
+---
+
+## Operating it
+
+### Set the region
+
+```sh
+export AWS_DEFAULT_REGION=eu-west-1
+```
+
+Every regional command in this README assumes it. A CLI defaulting to another region does not
+error — it returns empty results from the wrong region, which look exactly like a resource that
+does not exist. CloudFront, ACM for CloudFront and Route 53 are global or live in `us-east-1`;
+Cost Explorer is queried in `us-east-1`.
+
+### Prerequisites
+
+- An AWS account and the AWS CLI
+- [Terraform](https://developer.hashicorp.com/terraform/downloads) 1.10 or later
+- Domains delegated to Route 53
+- An AMI built from [aws-ols-mariadb-ami](https://github.com/bugfloyd/aws-ols-mariadb-ami) with
+  `-var profile=web`
+
+### Deploying
+
+Both `hostedzones/` and `infra/` use an S3 backend with native locking, configured by a
+`backend_config.hcl` that is not committed:
 
 ```hcl
 region = "eu-west-1"
 bucket = "your-terraform-state-bucket"
 ```
 
-Deploy the hosted zones first, then update your registrar with the name servers Terraform
-outputs and wait for propagation:
+State keys are `hosted-zones-state/terraform.tfstate` and `aws-wp/infra/terraform.tfstate`; a
+named workspace stores its state under `env:/<workspace>/`.
+
+**Hosted zones first**, deployed separately so domain records outlive the infrastructure. Set
+`websites` to the list of domains, apply, and delegate each domain to the name servers it outputs:
 
 ```sh
 cd hostedzones
@@ -315,11 +514,22 @@ terraform apply
 terraform output hosted_zone_name_servers
 ```
 
-Then fill in `infra/terraform.tfvars`: a `stack_name`, the hosted zone IDs from the previous
-step, your AMI id, globally unique names for the config and CloudFront log buckets, and the
-address alarms should notify. For anything that will serve real traffic, also set
-`db_deletion_protection = true` and `db_skip_final_snapshot = false` — the defaults are built
-to be torn down. Then deploy:
+**Then the stack.** `infra/terraform.tfvars` needs at least:
+
+```hcl
+stack_name                     = "wp-prod"
+ols_image_id                   = "ami-..."
+domains                        = { "example.com" = "Z0123456789" }   # domain => hosted zone ID
+admin_ips                      = ["203.0.113.10/32"]
+admin_public_key               = "ssh-ed25519 ..."
+config_bucket_name             = "wp-prod-config-123456789012"
+cloudfront_logging_bucket_name = "wp-prod-cloudfront-logs-123456789012"
+alert_email                    = "you@example.com"
+
+# for anything serving real traffic
+db_deletion_protection = true
+db_skip_final_snapshot = false
+```
 
 ```sh
 cd ../infra
@@ -327,89 +537,505 @@ terraform init -backend-config backend_config.hcl
 terraform apply
 ```
 
-**Confirm the SNS subscription** from the email AWS sends, or no alarm reaches anyone.
+A first apply takes around 20 minutes; the database is the long part (about 12), the file system
+about 5. Then **confirm the SNS subscription** from the email AWS sends — until then no alarm
+reaches anyone.
 
-To tear everything down, `terraform destroy` in `infra/` first, then `hostedzones/`. With
-deletion protection on, the database has to be released first.
+The region is a variable (`region`, default `eu-west-1`) in `infra/`, and fixed to `eu-west-1` in
+`hostedzones/`.
 
-## Reaching the instance
+To tear it down: `terraform destroy` in `infra/`. With deletion protection on, set
+`db_deletion_protection = false` and apply first. Buckets that still hold objects or object
+versions (config, logs, media), and a backup vault holding recovery points, stop a destroy until
+they are emptied. Destroying `hostedzones/` as well gives every domain new name servers, which
+means delegating them again.
 
-The instance is publicly routable but not publicly reachable: its security group allows port
-80 from CloudFront's managed prefix list only. Two ways in:
+### Adding a site
+
+Create its hosted zone (add it to `websites` in `hostedzones/`), then add it to `domains` and
+apply. The instance is replaced, its bootstrap installs WordPress for the new domain, and the
+domain gets a certificate, a distribution, DNS records and a media bucket. Visit
+`https://<domain>/wp-admin/install.php` to finish the install. Until then its login page redirects
+to the installer, which the canary counts as a failure.
+
+### Reaching the instance
 
 ```sh
-# Session Manager — no inbound rule, no key, and it logs to CloudTrail
-aws ssm start-session --target i-xxxx
+IID=$(aws ec2 describe-instances --filters Name=tag:Name,Values=WebserverInstance \
+        Name=instance-state-name,Values=running --query 'Reservations[].Instances[].InstanceId' --output text)
 
-# run something on it without a shell
-aws ssm send-command --instance-ids i-xxxx \
-  --document-name AWS-RunShellScript --parameters 'commands=["systemctl is-active lsws"]'
+# a shell, no key or inbound rule
+aws ssm start-session --target "$IID"
+
+# one command, no shell
+CID=$(aws ssm send-command --instance-ids "$IID" --document-name AWS-RunShellScript \
+        --parameters 'commands=["systemctl is-active lsws"]' --query Command.CommandId --output text)
+aws ssm get-command-invocation --command-id "$CID" --instance-id "$IID" --query StandardOutputContent --output text
 ```
 
-Prefer the instance ID to a tag filter: every stack tags its instance `WebserverInstance`, so
-while two stacks coexist a tag target reaches both.
+While two stacks coexist the tag matches both instances; use the instance ID from Terraform state
+instead. SSH (`ssh ubuntu@<elastic-ip>`) works from `admin_ips` as a fallback.
 
-SSH from the addresses in `admin_ips` is kept as a fallback for when the SSM agent itself is
-what is broken.
-
-The OpenLiteSpeed console listens on the loopback interface only, so it needs a forward:
+**WebAdmin**, which listens on loopback only:
 
 ```sh
-aws ssm start-session --target i-xxxx \
-  --document-name AWS-StartPortForwardingSession \
+aws ssm start-session --target "$IID" --document-name AWS-StartPortForwardingSession \
   --parameters '{"portNumber":["7080"],"localPortNumber":["7080"]}'
-# then https://localhost:7080
+# https://localhost:7080 - user admin, password:
+aws ssm get-parameter --name /<stack_name>/ols/admin-password --with-decryption --query Parameter.Value --output text
 ```
 
-The password is in Parameter Store at `/<stack_name>/ols/admin-password`. Anything changed
-through that console is lost the next time the instance is replaced.
+**The database**, from the instance. As a site's own user (credentials in its `wp-config.php`), or
+as the master user, whose password RDS keeps in Secrets Manager and rotates:
 
-## Alerting
+```sh
+wp-site <domain> db cli
 
-CloudWatch alarms cover EC2 status checks, RDS free storage, and the file system's storage
-and throughput. They publish to an SNS topic with an email subscription set by `alert_email`.
+aws secretsmanager get-secret-value --secret-id $(terraform output -raw db_master_secret_arn) \
+  --query SecretString --output text                  # from your machine, in infra/
+mysql -h <db_endpoint> -u wpadmin -p                   # on the instance
+```
 
-**FSx storage can fill up**, which EFS never could, so it has an alarm — computed with metric
-math. OpenZFS publishes `StorageCapacity` and `UsedStorageCapacity` in bytes and no percentage;
-the obvious-looking `StorageCapacityUtilization` does not exist for it, and an alarm on a metric
-that never reports sits in OK forever.
+### Updating WordPress, plugins and themes
 
-**Every instance replacement raises a brief false alarm.** A new instance takes about five
-minutes to start publishing status-check metrics, and the alarm treats missing data as
-failing — deliberately, since a dead instance also stops publishing.
+Through the admin screens, as usual — within limits. Each update rewrites files on network
+storage and must finish inside CloudFront's 120-second origin timeout. A 5,872-file plugin takes
+about 39 seconds. For anything larger, or when the admin screens are the problem, use WP-CLI on
+the instance:
 
-Those alarms watch infrastructure, and none of them catches the failure that actually
-happens: the web server coming up misconfigured while the machine underneath it is perfectly
-healthy. CloudFront makes it worse by continuing to serve the front page from cache, so the
-site looks fine from outside while everything dynamic returns 5xx.
+```sh
+wp-site <domain> plugin update --all
+wp-site <domain> core update
+```
 
-A **Synthetics canary** covers that gap — the only check here that makes a request the way a
-reader would. It requests `/wp-login.php`, which cannot be served from cache and which only
-returns 200 if PHP ran and WordPress reached the database, and it fails the run if the body
-comes back without a login form. Its alarm treats missing data as breaching, so a canary that
-stops reporting is itself an alert.
+### Changing configuration
 
-Canary runs are billed individually, at $0.0014 each:
+Any change to the bootstrap, the rendered OpenLiteSpeed config, `php_settings`, `php_children`,
+`domains`, `media_sync_interval` or the AMI replaces the instance. The old one is terminated first,
+so for a few minutes cached pages and S3 media keep serving while everything else returns 5xx; the
+instance-status alarm fires and clears once (see [Alerts](#alerts)). Changing `instance_type`
+stops and starts the same instance instead. To replace it deliberately:
+
+```sh
+terraform apply -replace=aws_instance.webserver
+```
+
+**After editing any file on the instance by hand — `wp-config.php` in particular — restart
+OpenLiteSpeed**, or OPcache may keep running the old version for up to fifteen minutes:
+
+```sh
+sudo /usr/local/lsws/bin/lswsctrl stop; sudo /usr/local/lsws/bin/lswsctrl start
+```
+
+**Rotating the WebAdmin password:** the bootstrap reads it at boot, so replace both together:
+`terraform apply -replace=random_password.ols_admin -replace=aws_instance.webserver`.
+
+### Replacing a whole stack
+
+A fresh stack beside the current one, cut over at the edge — how production moved from EFS to
+FSx, with about five minutes of downtime. The order matters.
+
+1. **Workspace and variables.** `terraform workspace new <stack>`, and a `<stack>.tfvars` overriding
+   `stack_name`, `key_pair_name = null`, `edge_policy_suffix`, both explicit bucket names, the
+   production database settings, and `db_snapshot_identifier`. `terraform.tfvars` still loads in
+   every workspace, so anything that must be unique has to be overridden. Pass
+   `-var-file=<stack>.tfvars` to every command.
+2. **Snapshot the current database** (`aws rds create-db-snapshot`).
+3. **Storage and database only**:
+   `terraform apply -var enable_edge=false -target=aws_fsx_openzfs_file_system.websites -target=aws_db_instance.websites`.
+   About 15 minutes. The instance must not exist yet: on an empty file system its bootstrap would
+   install WordPress and reset the restored database users' passwords.
+4. **Copy the files** with AWS DataSync — two VPCs cannot mount each other's storage, and
+   overlapping ranges cannot peer. Each location borrows its own stack's web security group, which
+   its file system already admits. For FSx the subdirectory is `/fsx/`. Task options:
+   `OverwriteMode=ALWAYS, PreserveDeletedFiles=REMOVE, Uid=INT_VALUE, Gid=INT_VALUE,
+   PosixPermissions=PRESERVE, TransferMode=CHANGED`, with a CloudWatch log group so a failed
+   verification names its files. The first run against a live site reports mismatches (files
+   change under it); run it again.
+5. **Everything else**: `terraform apply -var enable_edge=false`. The bootstrap skips every site,
+   and its health poll fails, because each `wp-config.php` still names the old database.
+6. **Final DataSync run, then delete the task.** Only then, on the new instance:
+
+   ```sh
+   sed -i -E "s|('DB_HOST',[[:space:]]*')[^']*(')|\1<new-endpoint>\2|" /var/www/*/html/wp-config.php
+   /usr/local/lsws/bin/lswsctrl stop; rm -f /tmp/lshttpd/*.sock*; /usr/local/lsws/bin/lswsctrl start
+   systemctl start wp-media-sync.service
+   ```
+
+   A DataSync run after the rewrite puts the old host back.
+7. **Verify before touching DNS.** Per site, on the instance: `/` and `/wp-login.php` answer 200
+   through `127.0.0.1` with its `Host` and `CloudFront-Forwarded-Proto: https`;
+   `wp-site <domain> db check` passes; post, comment and option counts and the latest
+   modification dates match the old database; the media bucket holds as many objects as the
+   site's `uploads/20??/` folders hold files.
+8. **Cut over.** Save each old distribution's config as JSON — restoring those is the rollback.
+   Set each one's aliases to empty and its certificate to the CloudFront default, then at once
+   `terraform apply -var enable_edge=true`.
+9. **Prove traffic reaches the new stack.** Each domain's alias targets a new distribution; an
+   existing image returns `x-amz-server-side-encryption` (only the new stack has an S3 origin);
+   the TLS serial is the new certificate's; on every site, an unmirrored year-folder file returns
+   that site's own content; the canary passes and the subscription is confirmed.
+10. **Retire the old stack after several days**, once the new one has its own backups:
+    - Snapshot its database by hand: a destroy deletes the automated backups too.
+    - Remove from its state the DNS records the new stack now owns — the apex and `www` aliases
+      **and the `cert_validation` records**. ACM reuses one validation record per domain per
+      account, so destroying them succeeds and silently breaks the new certificates' renewal.
+    - Empty its buckets, versions and delete markers included (`aws s3 rm` on a versioned bucket
+      only adds markers), and delete its vault's recovery points.
+    - `terraform plan -destroy`, and read it: no new-stack resource, no `route53_record`. Then
+      destroy, detached (`nohup`) — deleting distributions takes 20-30 minutes.
+    - Delete the RDS and canary log groups and the manual snapshots it leaves behind.
+    - Move the new stack's state into the default workspace (`state pull`, then `state push -force`
+      into the now-empty default state), fold `<stack>.tfvars` into `terraform.tfvars`, confirm
+      `terraform plan` reports no changes, and delete the named workspace.
+
+With `enable_edge=false`, a new stack's canary checks the live domains, which the old stack is
+still serving; it proves nothing about the new one until cutover.
+
+---
+
+## Logs
+
+| Log | Where | Retention | Survives replacement |
+| --- | ----- | --------- | -------------------- |
+| Bootstrap | `/var/log/wp-bootstrap.log`, `/var/log/cloud-init-output.log` | the instance's life | no |
+| Per-site access | `/var/www/<domain>/logs/access.log` | 10 MB files, 7 days, compressed | yes |
+| Per-site server errors | `/var/www/<domain>/logs/error.log` (level ERROR) | 10 MB files, 7 days | yes |
+| OpenLiteSpeed server | `/usr/local/lsws/logs/error.log` (ERROR), `stderr.log`, `lsrestart.log` | 10 MB files, 7 days | no |
+| WebAdmin | `/usr/local/lsws/admin/logs/error.log`, `access.log` | 10 MB files; access 90 days | no |
+| Scheduled jobs | `journalctl -u wp-cron.service`, `journalctl -u wp-media-sync.service` | systemd journal | no |
+| SSM agent | `/var/log/amazon/ssm/amazon-ssm-agent.log` | agent default | no |
+| CloudFront access | `s3://<cloudfront_logging_bucket_name>/<domain>/web/`, gzipped, delivered within about an hour | 5 years | — |
+| Canary run artifacts | `s3://<cloudfront_logging_bucket_name>/canary/eu-west-1/<canary>/YYYY/MM/DD/HH/` (request and step reports) | 5 years, the bucket's lifecycle | — |
+| Canary run history | CloudWatch Synthetics console, `aws synthetics get-canary-runs` | 2 days passed, 14 days failed | — |
+| Canary execution | CloudWatch Logs `/aws/lambda/cwsyn-<stack_name>-origin-<id>` | never expires | — |
+| Database errors | CloudWatch Logs `/aws/rds/instance/<stack_name>-mysql/error` | never expires | — |
+
+The per-site access log format is `%v %h %l %u %t "%r" %>s %b` — site, client address, time,
+request line, status, bytes; no referrer or user agent. **The client address is a CloudFront edge,
+not the visitor** (see [Known gaps](#known-gaps)). The server-level `access.log` stays empty
+because every site logs separately. For referrers, user agents, viewer addresses, edge cache
+results and timings, use the CloudFront logs.
+
+**PHP errors are not logged by default.** PHP has no `error_log` set, and nothing PHP reports
+reaches any log above. To capture them for one site, set `WP_DEBUG` to `true` in its
+`wp-config.php` and add the two lines below next to it, restart OpenLiteSpeed so OPcache picks up
+the change, reproduce, then revert and restart again:
+
+```php
+define( 'WP_DEBUG_LOG', '/var/www/<domain>/logs/php-debug.log' );
+define( 'WP_DEBUG_DISPLAY', false );
+```
+
+Give `WP_DEBUG_LOG` a path, not `true`: `true` writes `wp-content/debug.log`, inside the document
+root and downloadable by anyone who guesses the URL. The site's `logs` directory is on the file
+system, outside the document root, and writable by the web user.
+
+**The slow query log is exported but off.** `slowquery` is enabled for CloudWatch export, but the
+parameter group does not set `slow_query_log = 1`, so nothing is written. Set it (and
+`long_query_time`) in `database.tf` to use it.
+
+Reading them:
+
+```sh
+# on the instance
+sudo tail -f /var/www/<domain>/logs/access.log /var/www/<domain>/logs/error.log
+sudo tail -n 50 /usr/local/lsws/logs/error.log
+sudo journalctl -u wp-media-sync.service -n 20
+
+# from anywhere
+aws logs tail /aws/rds/instance/<stack_name>-mysql/error --since 1h
+aws s3 ls s3://<cloudfront_logging_bucket_name>/<domain>/web/ | tail
+aws s3 cp s3://<cloudfront_logging_bucket_name>/<domain>/web/<file>.gz - | gunzip | tail
+aws synthetics get-canary-runs --name <stack_name>-origin --max-results 5 \
+  --query 'CanaryRuns[].[Status.State,Status.StateReason,Timeline.Started]' --output table
+aws logs tail $(aws logs describe-log-groups --log-group-name-prefix /aws/lambda/cwsyn-<stack_name>-origin \
+  --query 'logGroups[0].logGroupName' --output text) --since 2h
+```
+
+---
+
+## Alerts
+
+Every alarm publishes both ALARM and OK to the SNS topic `<stack_name>-alerts`, which emails
+`alert_email`. **AWS emails a confirmation link when the subscription is created, and nothing is
+delivered until it is clicked.** Terraform cannot click it and the apply does not fail. Check it
+after any change to the topic. A subscription can also disappear later without any error, and an
+unsubscribe through an email link leaves no CloudTrail record:
+
+```sh
+aws sns list-subscriptions-by-topic --topic-arn $(terraform output -raw alerts_topic_arn) \
+  --query 'Subscriptions[].[Endpoint,SubscriptionArn]' --output text
+# a full ARN means confirmed; "PendingConfirmation" or "Deleted" means no email is sent
+```
+
+| Alarm | Fires when | Evaluated | Missing data | Means |
+| ----- | ---------- | --------- | ------------ | ----- |
+| `<stack_name>-origin-canary-failed` | the canary's `SuccessPercent` < 100 | one run (period derived from the schedule) | breaching | a site is not serving WordPress, whatever CloudFront still returns from cache — or the canary stopped running |
+| `<stack_name>-instance-status-failed` | EC2 `StatusCheckFailed` > 0 | 3 × 1 minute | breaching | the instance is failing its hardware or OS checks, or has stopped reporting |
+| `<stack_name>-rds-storage-low` | `FreeStorageSpace` < 2 GiB | 2 × 5 minutes | not breaching | the database is nearly full: autoscaling has reached `db_max_allocated_storage`, or has not caught up (it waits six hours between increases) |
+| `<stack_name>-fsx-storage-high` | used / provisioned storage > 80 % | 3 × 5 minutes | not breaching | the file system is filling up; it does not grow by itself |
+| `<stack_name>-fsx-throughput-high` | `NetworkThroughputUtilization` > 80 % | 3 × 5 minutes | not breaching | file operations are queuing against provisioned throughput |
+
+**The canary** is the only check that behaves like a reader. Hourly by default, it requests
+`https://<domain>/wp-login.php` for every site and fails the run unless the response is 200 and
+the body contains a login form. That page cannot be served from CloudFront's cache and only renders
+if PHP ran and WordPress reached the database — so it catches the failure the infrastructure
+alarms cannot: OpenLiteSpeed broken on a healthy instance while CloudFront keeps serving cached
+front pages.
 
 | `canary_schedule_expression` | Runs/month | Cost | Worst-case time to alert |
-| ---------------------------- | ---------- | ---- | ----------------------- |
+| ---------------------------- | ---------- | ---- | ------------------------ |
 | `rate(5 minutes)` | 8,640 | ~$12.10 | ~5 min |
 | `rate(15 minutes)` | 2,880 | ~$4.03 | ~15 min |
 | `rate(1 hour)` (default) | 730 | ~$1.02 | ~1 hour |
 
-Hourly is the default because five-minute checks cost disproportionately for quiet sites.
-What you give up is resolution: an outage shorter than an hour can fall entirely between two
-runs, so the canary catches a site that is broken and staying broken.
+An outage shorter than the interval can fall between two runs, and an hourly alarm takes up to an
+hour to clear after recovery. The alarm period is derived from the expression, because a fixed
+five-minute period against an hourly canary leaves eleven windows in twelve empty — which the
+breaching missing-data rule turns into a permanent alarm. Set `enable_canary = false` to drop it.
 
-**The alarm's period is derived from this expression, not set separately.** With a
-five-minute period and an hourly canary, eleven windows in twelve contain no data, and
-because missing data counts as breaching, the alarm would sit permanently in ALARM.
+**Expected false alarms:**
 
-Set `enable_canary = false` to drop it entirely.
+- **Every instance replacement.** A new instance starts publishing status-check metrics about five
+  minutes after launch, and missing data counts as failing. Expect an ALARM and an OK email.
+- **A site added but not yet installed.** Its login page redirects to the installer, which fails
+  the canary until the install is finished.
 
-> [!IMPORTANT]
-> AWS emails a confirmation link when the subscription is created, and Terraform cannot
-> accept it for you. Until you click it the subscription stays in `PendingConfirmation` and
-> **no alarm reaches anyone** — without failing the apply or showing an error. A subscription
-> can also disappear later with no error either; check `list-subscriptions-by-topic` after any
-> change to the topic.
+---
+
+## Debugging
+
+**Start with where the failure is.** From outside:
+
+```sh
+for p in / /wp-login.php /wp-admin/; do curl -s -o /dev/null -w "$p %{http_code} %header{x-cache}\n" https://<domain>$p; done
+```
+
+A 200 homepage with `Hit from cloudfront` proves only that CloudFront has a copy; `/wp-login.php` is
+never cached. Then from the instance, bypassing CloudFront:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: <domain>' -H 'CloudFront-Forwarded-Proto: https' http://127.0.0.1/wp-login.php
+```
+
+**Dynamic pages fail, cached pages work** (the canary alarm):
+
+```sh
+systemctl is-active lsws; pgrep -c lsphp
+sudo tail -n 50 /usr/local/lsws/logs/error.log /var/www/<domain>/logs/error.log
+wp-site <domain> db check
+free -m; swapon --show
+```
+
+A 503 on every PHP request with `cgidSuEXEC failed` means `CGIRLimit` is missing. `Failed to lock
+pid file` means stale sockets in `/tmp/lshttpd`: stop, clear them, start.
+
+**"Error establishing a database connection".** Check `DB_HOST` in the site's `wp-config.php`, that
+the database is `available`, and — if the file was edited recently — restart OpenLiteSpeed, since
+OPcache may still hold the old version.
+
+**An instance never comes up after a replacement.**
+
+```sh
+aws ec2 get-console-output --instance-id "$IID" --latest --output text | tail -40
+# once Session Manager works:
+cloud-init status --long; sudo cat /var/log/wp-bootstrap.log
+```
+
+`FATAL: could not mount` points at the file system: its security group must admit the web security
+group on 2049, and the mount must not use `noresvport`. Repeated `curl: (22) ... error: 500` lines
+before `wp-bootstrap finished` mean OpenLiteSpeed is up and WordPress is failing — often a
+`wp-config.php` naming a database this VPC cannot reach. `curl: (7) Failed to connect` means
+OpenLiteSpeed itself did not start; see its `error.log`.
+
+**504 from CloudFront on an admin action.** It took longer than the 120-second origin timeout. The
+action may still have finished on the instance; re-check, and use WP-CLI for anything that large.
+
+**An image on one site shows another site's page.** The fallback reached the instance with a `Host`
+no virtual host matches. Check that `origin.<domain>` resolves to the Elastic IP and appears in the
+listener map in `/usr/local/lsws/conf/httpd_config.conf`.
+
+**A new image is broken for a few minutes.** It is waiting for the next sync and the instance
+fallback failed; see the previous entry. To mirror at once: `sudo systemctl start wp-media-sync.service`.
+
+**A change does not show up for visitors.** Public pages are cached for 24 hours and static files
+for seven days (see [What serves a request](#what-serves-a-request)); a logged-in editor bypasses
+the cache and sees the change at once. Invalidate what changed, or the whole site:
+
+```sh
+aws cloudfront list-distributions --query "DistributionList.Items[].[Id,Aliases.Items[0]]" --output text
+aws cloudfront create-invalidation --distribution-id <id> --paths "/*"
+```
+
+The first 1,000 invalidation paths each month are free, and `/*` counts as one. A year-folder media
+file edited in place (WordPress never does this) needs its path invalidated too.
+
+**Media is not reaching S3.** `journalctl -u wp-media-sync.service`; run
+`sudo /usr/local/bin/wp-media-sync.sh` by hand; check `/etc/wp-media-sync.conf`; confirm the mount.
+The script exits silently if another instance holds its lock.
+
+**No alarm emails.** Check the subscription (see [Alerts](#alerts)).
+
+**Terraform reports a held lock after an interrupted apply.** Make sure no Terraform process is
+alive — `pgrep -x terraform`, not `pgrep -f`, which matches any command line containing the word —
+then read the lock ID and release it:
+
+```sh
+aws s3 cp s3://<state-bucket>/aws-wp/infra/terraform.tfstate.tflock -              # default workspace
+aws s3 cp s3://<state-bucket>/env:/<workspace>/aws-wp/infra/terraform.tfstate.tflock - # any other
+terraform force-unlock <ID>
+```
+
+---
+
+## Backups and recovery
+
+| What | Backed up by | Schedule | Retention | Where |
+| ---- | ------------ | -------- | --------- | ----- |
+| Database | RDS automated backups, with point-in-time recovery | daily, 02:00–03:00 UTC, plus transaction logs | 30 days | RDS snapshots `rds:<stack_name>-mysql-<date>` |
+| File system (all sites' files and media) | AWS Backup | daily, 03:00 UTC (must start within an hour, finish within three) | 30 days | vault `<stack_name>-backup-vault` |
+| Database, on destroy | final snapshot, when `db_skip_final_snapshot = false` | once | until deleted | `<stack_name>-mysql-final` |
+| Manual database snapshots | you, with `aws rds create-db-snapshot` | before risky changes | until deleted | RDS snapshots |
+| OpenLiteSpeed configuration | S3 versioning | every apply | indefinite | the config bucket |
+| Terraform state | S3 versioning on the state bucket | every apply | indefinite | the state bucket |
+
+**Not backups:** the media buckets (a serving copy of the file system, rebuilt by the sync), the
+instance's root volume (everything on it is rebuilt at boot; only server logs are lost), and changes
+made through WebAdmin (lost by design).
+
+**Destroying the database deletes its automated backups** (the provider's default,
+`delete_automated_backups = true`); only a final or manual snapshot survives it.
+
+The file system's own automatic backups are off (`automatic_backup_retention_days = 0`) so AWS
+Backup is the single schedule; running both would pay twice for the same recovery points.
+
+```sh
+aws rds describe-db-snapshots --db-instance-identifier <stack_name>-mysql --query 'DBSnapshots[].[DBSnapshotIdentifier,SnapshotCreateTime]' --output table
+aws rds describe-db-instances --db-instance-identifier <stack_name>-mysql --query 'DBInstances[0].LatestRestorableTime'
+aws backup list-recovery-points-by-backup-vault --backup-vault-name <stack_name>-backup-vault \
+  --query 'RecoveryPoints[].[CreationDate,Status,BackupSizeInBytes]' --output table
+```
+
+**Recovering a database.** Every RDS restore creates a new instance, never an in-place rewind.
+
+- *A whole stack's data* — restore or snapshot into a replacement stack with
+  `db_snapshot_identifier`, as in [Replacing a whole stack](#replacing-a-whole-stack). This is the
+  path production has actually used.
+- *One site, or a point in time* — restore to a temporary instance beside the live one, dump that
+  site's database from the web instance with `mysqldump`, using the site's own user and password
+  from its `wp-config.php` (they are in the restored copy too), load it into the live database,
+  then delete the temporary instance.
+
+```sh
+aws rds restore-db-instance-to-point-in-time --source-db-instance-identifier <stack_name>-mysql \
+  --target-db-instance-identifier <stack_name>-mysql-recovery --restore-time <ISO-8601> \
+  --db-subnet-group-name <stack_name>-db-subnet-group --db-parameter-group-name <stack_name>-mysql84 \
+  --vpc-security-group-ids <the database's security group> \
+  --db-instance-class db.t4g.micro --no-publicly-accessible
+```
+
+**Recovering files.** Restoring an FSx recovery point also creates a new file system rather than
+rewinding the live one. Restore it into the stack's data subnet and file system security group,
+mount it on the instance beside `/var/www`, and copy back what is needed with
+`rsync -aH --numeric-ids`, which preserves the uid 33 ownership WordPress needs. This path has not
+yet been exercised on this stack; try it on a spare restore before relying on it.
+
+---
+
+## Cost
+
+eu-west-1, on-demand prices before tax, for three low-traffic sites.
+
+| Item | Monthly |
+| ---- | ------- |
+| FSx for OpenZFS, Single-AZ, 64 GiB + 64 MB/s | ~$24.64 |
+| RDS `db.t4g.micro` + 20 GB gp3 | ~$16 |
+| EC2 `t3.micro` | ~$8.30 |
+| Public IPv4 address (the Elastic IP — charged whether or not attached) | ~$3.65 |
+| EBS root volume, 20 GB gp3 | ~$1.80 |
+| Route 53, three hosted zones at $0.50 each (alias queries to CloudFront are free) | ~$1.50 |
+| CloudFront, S3 (config, logs, media) | ~$1–2 |
+| Synthetics canary, hourly | ~$1.02 |
+| CloudWatch alarms (six metrics) and logs | ~$0.70 |
+| AWS Backup storage | < $1 |
+| Secrets Manager (the RDS master secret) | $0.40 |
+| **Total** | **~$60** |
+
+The file system is the largest line, and it buys speed rather than savings. Two costs worth
+watching: **RDS Extended Support** ($172/month on this instance class, if the engine version
+lapses — see [Database](#database)), and **the canary schedule**, at $0.0014 a run. The bill barely
+moves as sites are added to the same stack.
+
+---
+
+## Known gaps
+
+| Gap | Detail |
+| --- | ------ |
+| **Visitor addresses are lost** | OpenLiteSpeed's `useIpInProxyHeader 2` uses `X-Forwarded-For` only from trusted IPs, and none are configured. Logs and PHP see the CloudFront edge's address, which affects comment IPs, spam filtering and rate limiting. Trusting the header from every peer is not a safe fix alone: viewers can send their own. A robust fix reads the `CloudFront-Viewer-Address` header, which CloudFront sets and viewers cannot. |
+| **PHP errors are not logged by default** | See [Logs](#logs) for capturing them per site. |
+| **The slow query log is off** | Exported to CloudWatch, never written. |
+| **Nothing replaces a broken instance** | EC2's default automatic recovery moves the instance to healthy hardware when its host fails, but a broken OS or web server is only reported, by the canary. No Auto Scaling group acts on it until the Scalable stage. |
+| **Content changes wait on the edge cache** | Public pages stay cached for up to 24 hours after an edit unless invalidated. Nothing purges CloudFront on publish. |
+| **Single Availability Zone** | The instance, the file system and the database each live in one zone. The Resilient stage fixes it. |
+| **A false alarm per instance replacement** | See [Alerts](#alerts). |
+| **Server logs do not survive replacement** | Per-site logs live on the file system; the bootstrap and server logs do not. |
+| **Large admin-panel updates are bounded** | By the 120-second origin timeout. WP-CLI is not. |
+| **Service-created logs never expire** | The canary's and RDS's CloudWatch log groups have no retention and outlive their canary or database; canary artifacts in S3 follow the log bucket's five-year lifecycle. |
+| **Provider versions float** | `.terraform.lock.hcl` is not committed, so providers resolve within their constraints at `init`. |
+
+---
+
+## Later stages
+
+Constraints the current code imposes on what comes next:
+
+| Stage | Changes | Notes |
+| ----- | ------- | ----- |
+| Scalable | Private subnets, NAT gateway, ALB, launch template, Auto Scaling group | The protocol shim already honours `X-Forwarded-Proto`. The first site's `*` listener mapping lets a load balancer's health check, which addresses the target by IP, reach a site. Cron and media sync already elect a single runner across instances. |
+| Resilient | Instances across AZs, NAT per AZ, `multi_az = true`, Multi-AZ FSx | RDS Multi-AZ is an in-place modify. FSx Single-AZ to Multi-AZ is a new file system, and the data moves with DataSync. |
+| Cached | ElastiCache per AZ, LiteSpeed Cache plugin | The server cache module is present with `enableCache = 0` (`enable_ols_cache`), so enabling it is a value change. A page cache on each instance goes stale across instances: let CloudFront be the shared page cache and purge on publish, or accept a short TTL. Do not put the cache root on the shared file system. LiteSpeed Cache rather than W3 Total Cache, because it drives the server's own cache module. |
+| Reference | Aurora with a read replica, read/write splitting, dashboard | `DB_HOST` is written into each site's `wp-config.php` only at install, so an endpoint change is a rewrite of each config plus an OpenLiteSpeed restart — not a template change. |
+
+Graviton (arm64) is not yet supported by the AMI build. It saves about 20 % per instance and becomes
+worth an AMI change once there are several instances.
+
+---
+
+## Repository layout
+
+| Path | Contents |
+| ---- | -------- |
+| `hostedzones/` | Route 53 hosted zones, separate state |
+| `infra/backend.tf` | S3 backend, provider requirements |
+| `infra/main.tf` | Providers, the per-domain edge module |
+| `infra/variables.tf` | Every input, with defaults and validation |
+| `infra/network_networks.tf`, `network_gateways.tf`, `network_routes.tf` | VPC, subnets, gateway, routes |
+| `infra/webserver.tf`, `webserver_network.tf` | Instance, Elastic IP, key pair, security group |
+| `infra/instance_iam.tf` | Instance role, Session Manager, bootstrap permissions |
+| `infra/fsx.tf` | File system, its security group and alarms |
+| `infra/database.tf` | Database, subnet and parameter groups, security group |
+| `infra/media.tf` | Media buckets, origin access control, bucket policies, sync permissions |
+| `infra/config_bucket.tf`, `bootstrap.tf` | Rendered configs, WebAdmin password, user data |
+| `infra/logging_bucket.tf` | CloudFront logs bucket |
+| `infra/backup.tf` | Backup vault, plan, selection, role |
+| `infra/alerts.tf` | SNS topic, instance and database alarms |
+| `infra/canary.tf`, `canary_iam.tf` | Synthetics canary, its alarm and role |
+| `infra/cert_cloudfront_dns/` | Per-domain certificate, distribution, policies, DNS records |
+| `infra/templates/bootstrap.sh.tftpl` | Instance bootstrap |
+| `infra/templates/httpd_config.conf.tftpl`, `vhconf.conf.tftpl`, `admin_config.conf.tftpl` | OpenLiteSpeed server, virtual host and WebAdmin configs |
+| `infra/templates/canary.js` | Canary script |
+
+Outputs: `webserver_public_ip`, `webserver_public_dns`, `db_endpoint`, `db_master_secret_arn`,
+`fsx_file_system_id`, `fsx_dns_name`, `media_buckets`, `backup_vault_name`, `alerts_topic_arn`,
+`ols_admin_password_parameter`.
+
+## Related projects
+
+- [bugfloyd/aws-ols-mariadb-ami](https://github.com/bugfloyd/aws-ols-mariadb-ami) — Packer and
+  Ansible build for the AMI. Use `-var profile=web` for this project; the `standalone` profile
+  builds the self-contained image the AMI post describes.
+- [bugfloyd/ols-wp-backup](https://github.com/bugfloyd/ols-wp-backup) — server-level backup
+  scripts for the `standalone` profile. From the Stateless stage on, RDS automated backups and AWS
+  Backup replace them.
