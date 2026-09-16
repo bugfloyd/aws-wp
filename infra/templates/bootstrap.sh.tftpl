@@ -373,7 +373,12 @@ while IFS='=' read -r DOMAIN BUCKET; do
   [ -d "$UPLOADS" ] || continue
   [ -n "$(ls -A "$UPLOADS" 2>/dev/null)" ] || continue
 
-  aws s3 sync "$UPLOADS" "s3://$BUCKET/wp-content/uploads"     --delete --only-show-errors --no-progress || true
+  # Year folders only, matching the CloudFront path that serves from the
+  # bucket. Plugin directories under uploads are left on the file system, where
+  # they are always current; mirroring them would only put stale copies - and
+  # anything a plugin keeps there - into a bucket. --delete honours the filter,
+  # so it never touches keys outside it.
+  aws s3 sync "$UPLOADS" "s3://$BUCKET/wp-content/uploads" --exclude '*' --include '20[0-9][0-9]/*' --delete --only-show-errors --no-progress || true
 done < /etc/wp-media-sync.conf
 MEDIASYNC
 chmod 0755 /usr/local/bin/wp-media-sync.sh

@@ -93,15 +93,27 @@ resource "aws_cloudfront_distribution" "cloudfront" {
   # wp-content/uploads that the mirror deliberately does not cover - falls
   # through to the default behavior and the instance.
   ordered_cache_behavior {
-    path_pattern           = "/wp-content/uploads/*"
+    path_pattern           = "/wp-content/uploads/20??/*"
     target_origin_id       = "MediaGroup"
     viewer_protocol_policy = "redirect-to-https"
     allowed_methods        = ["GET", "HEAD"]
     cached_methods         = ["GET", "HEAD"]
     compress               = true
 
-    # Media is immutable in practice: WordPress writes a new filename rather
-    # than editing one in place. CachingOptimized is the managed policy for it.
+    # Only WordPress's own media, which lives in year/month folders. It is
+    # immutable in practice - WordPress writes a new filename rather than editing
+    # one in place - so CachingOptimized suits it, and that policy ignores query
+    # strings.
+    #
+    # Which is exactly why the rest of uploads must not come through here.
+    # Plugins also write under wp-content/uploads, and some regenerate a file
+    # under the same name and bust caches with a query string: Elementor rewrites
+    # elementor/css/post-6.css and links it as post-6.css?ver=<timestamp>. Under
+    # this policy the new version would share the old one's cache entry, and S3
+    # would hold the stale copy until the next sync. Routed through the default
+    # behavior instead, those files come fresh from the file system with query
+    # strings in the cache key - and nothing a plugin drops into uploads becomes
+    # reachable from a bucket.
     cache_policy_id = "658327ea-f89d-4fab-a63d-7e88639e58f6"
   }
 
