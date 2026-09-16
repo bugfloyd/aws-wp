@@ -43,7 +43,7 @@ variable "origin_read_timeout" {
 }
 
 variable "media_bucket_regional_domain_name" {
-  description = "Regional domain name of this site's media bucket, used as the preferred origin for /wp-content/uploads/*"
+  description = "Regional domain name of this site's media bucket, used as the preferred origin for year-folder media, /wp-content/uploads/20??/*"
   type        = string
 }
 

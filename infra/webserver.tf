@@ -74,6 +74,6 @@ output "webserver_public_ip" {
 }
 
 output "webserver_public_dns" {
-  description = "Origin hostname the CloudFront distributions point at"
+  description = "Public DNS name of the Elastic IP. CloudFront does not use it: each site reaches the instance as origin.<domain>"
   value       = aws_eip.webserver.public_dns
 }

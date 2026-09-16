@@ -21,7 +21,7 @@ resource "aws_route_table_association" "public_subnet_a_association" {
 }
 
 # Data
-# Deliberately no default route. RDS and EFS need only local VPC routing, so
+# Deliberately no default route. RDS and the file system need only local VPC routing, so
 # the data tier has no path to the internet at all.
 resource "aws_route_table" "data_route_table" {
   vpc_id = aws_vpc.bugfloyd.id

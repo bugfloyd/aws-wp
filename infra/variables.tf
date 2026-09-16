@@ -134,7 +134,7 @@ variable "fsx_throughput_capacity" {
 }
 
 variable "php_settings" {
-  description = "php.ini values applied at boot. The image ships PHP's own defaults, which are wrong for WordPress in visible ways - a 2 MB upload cap rejects an ordinary phone photo, and 30 seconds is under half what a large plugin update needs against EFS"
+  description = "php.ini values applied at boot. The image ships PHP's own defaults, which are wrong for WordPress in visible ways - a 2 MB upload cap rejects an ordinary phone photo, and 30 seconds is too short for a large plugin update on network storage"
   type        = map(string)
 
   default = {
@@ -145,31 +145,33 @@ variable "php_settings" {
     post_max_size       = "64M"
     max_input_vars      = "3000"
 
-    # OPcache is what keeps EFS off the read path: without it every request
-    # re-reads and recompiles PHP source over NFS.
+    # OPcache is what keeps the network file system off the read path: without
+    # it every request re-reads and recompiles PHP source over NFS.
     "opcache.enable" = "1"
 
-    # The default 10,000 does not fit the 16,400 PHP files three WordPress
-    # installs bring. Anything past the limit is evicted and recompiled on the
-    # next request, and each recompile is another round trip to EFS.
+    # Headroom over the default 10,000. Three WordPress installs bring about
+    # 16,400 PHP files, of which a couple of thousand are actually executed;
+    # anything evicted is recompiled on the next request, from NFS.
     "opcache.max_accelerated_files"   = "20000"
     "opcache.memory_consumption"      = "160"
     "opcache.interned_strings_buffer" = "16"
 
     # Revalidation stats every cached file to see whether it changed. On a local
     # disk that is free; on NFS it is a network round trip, and the default of 2
-    # seconds means doing it constantly. AWS recommends 900 for EFS.
+    # seconds means doing it constantly. AWS recommends 900 for network file systems.
     #
     # Stale bytecode after an update is not a risk: WordPress calls
     # opcache_invalidate() on every file it writes during a plugin, theme or
     # core update, so its own changes take effect immediately regardless.
+    # Changes made outside WordPress - editing wp-config.php by hand - do not:
+    # restart OpenLiteSpeed after one.
     "opcache.validate_timestamps" = "1"
     "opcache.revalidate_freq"     = "900"
   }
 }
 
 variable "php_children" {
-  description = "Ceiling on LSPHP worker processes for the whole server. Children are forked on demand, so idle sites cost nothing - but the ceiling must fit in instance memory at roughly 40-60 MB each, because a burst can reach it"
+  description = "Ceiling on LSPHP worker processes for the whole server. Children are forked on demand, so idle sites cost nothing - but the ceiling must fit in instance memory, because a burst can reach it. Each worker adds about 26 MB of shared pages, though ps reports around 95 MB"
   type        = number
   default     = 15
 }
@@ -220,7 +222,7 @@ variable "alert_email" {
 }
 
 variable "origin_read_timeout" {
-  description = "Seconds CloudFront waits for the origin. Admin actions that rewrite many files on EFS are slow enough to exceed the 30-second default and surface as a 504. 120 is this account's \"Response timeout per origin\" quota, which is adjustable on request"
+  description = "Seconds CloudFront waits for the origin. Admin actions that rewrite many files on network storage can exceed the 30-second default and surface as a 504. 120 is this account's \"Response timeout per origin\" quota, which is adjustable on request"
   type        = number
   default     = 120
 

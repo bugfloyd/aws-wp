@@ -17,7 +17,7 @@ resource "aws_security_group" "rds" {
     security_groups = [aws_security_group.ec2_web.id]
   }
 
-  # No egress, same reasoning as the EFS security group.
+  # No egress, same reasoning as the file system's security group.
 
   tags = {
     Name       = "WebsitesRdsSecurityGroup"

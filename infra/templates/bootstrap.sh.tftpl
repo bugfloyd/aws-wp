@@ -31,7 +31,7 @@ systemctl disable --now rpcbind rpcbind.socket >/dev/null 2>&1 || true
 # 2. Swap
 # ---------------------------------------------------------------------------
 # Insurance against the tail, not a substitute for memory. LSPHP workers cost
-# about 26 MB each in shared pages, but PHP's memory_limit is 128 MB, so a
+# about 26 MB each in shared pages, but PHP's memory_limit is 256 MB, so a
 # handful of simultaneously heavy requests can each grow far past the average.
 # Without swap that is an OOM kill; with it, the worst case is a slow request.
 #
@@ -195,15 +195,16 @@ for DOMAIN in "$${DOMAINS[@]}"; do
 
   mkdir -p "$HTML_ROOT" "$SITE_ROOT/logs"
 
-  # Per-vhost config is local to the instance, not on shared storage: derived state,
-  # regenerated on every boot from the launch template.
+  # Per-vhost config is local to the instance, not on shared storage: derived
+  # state, regenerated on every boot from the user data.
   mkdir -p "/usr/local/lsws/conf/vhosts/$DOMAIN"
   cp /tmp/vhconf.template "/usr/local/lsws/conf/vhosts/$DOMAIN/vhconf.conf"
   sed -i "s/__DOMAIN__/$DOMAIN/g" "/usr/local/lsws/conf/vhosts/$DOMAIN/vhconf.conf"
   chown -R lsadm:www-data "/usr/local/lsws/conf/vhosts/$DOMAIN"
 
-  # Answer health checks before WordPress exists, otherwise the target is
-  # marked unhealthy and the instance is replaced before it can finish.
+  # Serve a placeholder until WordPress exists, so anything checking the site
+  # during a first install - the canary, or a load balancer in later stages -
+  # gets an answer rather than an error.
   if [ ! -e "$HTML_ROOT/index.html" ] && [ ! -e "$HTML_ROOT/index.php" ]; then
     echo "<!doctype html><title>provisioning</title>provisioning" > "$HTML_ROOT/index.html"
   fi
@@ -267,13 +268,14 @@ foreach ( array( 'HTTP_CLOUDFRONT_FORWARDED_PROTO', 'HTTP_X_FORWARDED_PROTO' ) a
     }
 }
 
-/* Several instances serve this site. WordPress fires wp-cron.php via loopback
-   on ordinary requests, and its internal lock is advisory, so every instance
-   would run the same scheduled jobs. Cron is driven from one place instead. */
+/* WordPress normally fires wp-cron.php from ordinary page requests, which only
+   happens when someone visits and, with several instances, would run the same
+   jobs on each. A systemd timer drives it instead, on one instance at a time. */
 define( 'DISABLE_WP_CRON', true );
 
-/* The filesystem is shared and immutable from the application's point of view.
-   Updates go through a new image, not through the admin screens. */
+/* No theme and plugin code editor in the admin screens, and no unattended
+   background updates: updates happen when someone chooses to run them, from the
+   admin screens or with WP-CLI. */
 define( 'DISALLOW_FILE_EDIT', true );
 define( 'AUTOMATIC_UPDATER_DISABLED', true );
 
@@ -294,7 +296,7 @@ flock -u 200
 echo "Released bootstrap lock"
 
 # ---------------------------------------------------------------------------
-# 6b. Drive WordPress cron from exactly one instance
+# 8. Drive WordPress cron from exactly one instance
 # ---------------------------------------------------------------------------
 # wp-config sets DISABLE_WP_CRON, so nothing runs scheduled jobs by itself any
 # more. This timer runs on every instance, but the lock lives on shared storage
@@ -341,13 +343,13 @@ systemctl daemon-reload
 systemctl enable --now wp-cron.timer
 
 # ---------------------------------------------------------------------------
-# 6c. Mirror uploads to S3 so CloudFront can serve them without the instance
+# 9. Mirror media to S3 so CloudFront can serve it without the instance
 # ---------------------------------------------------------------------------
 # WordPress is untouched by this. It keeps writing to wp-content/uploads on
 # shared storage, which stays the source of truth; the bucket is a serving copy.
-# CloudFront prefers the bucket for /wp-content/uploads/* and falls back to this
-# instance for anything not mirrored yet, so the interval below is a performance
-# knob and not a window in which uploads can be lost.
+# CloudFront prefers the bucket for /wp-content/uploads/20??/* and falls back to
+# this instance for anything not mirrored yet, so the interval below is a
+# performance knob and not a window in which uploads can be lost.
 #
 # Same single-runner election as wp-cron: the lock is on shared storage and taken
 # non-blocking, so one instance syncs however many are running.
@@ -390,7 +392,7 @@ echo "${domain}=${bucket}" >> /etc/wp-media-sync.conf
 
 cat > /etc/systemd/system/wp-media-sync.service <<'MEDIASERVICE'
 [Unit]
-Description=Mirror WordPress uploads to S3
+Description=Mirror WordPress media to S3
 After=network-online.target var-www.mount
 
 [Service]
@@ -400,7 +402,7 @@ MEDIASERVICE
 
 cat > /etc/systemd/system/wp-media-sync.timer <<'MEDIATIMER'
 [Unit]
-Description=Mirror WordPress uploads to S3 every ten minutes
+Description=Mirror WordPress media to S3 on a timer
 
 [Timer]
 OnBootSec=3min
@@ -415,7 +417,7 @@ systemctl daemon-reload
 systemctl enable --now wp-media-sync.timer
 
 # ---------------------------------------------------------------------------
-# 8. Start serving
+# 10. Start serving
 # ---------------------------------------------------------------------------
 mkdir -p /tmp/lshttpd
 

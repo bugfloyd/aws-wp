@@ -44,7 +44,7 @@ resource "aws_iam_instance_profile" "ols_instance_profile" {
 
 # --- Bootstrap permissions -------------------------------------------------
 
-# Session Manager, so a private instance can be reached without SSH keys.
+# Session Manager, so the instance can be reached with no SSH key and no inbound rule.
 resource "aws_iam_role_policy_attachment" "ssm_core" {
   role       = aws_iam_role.instance_role.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"

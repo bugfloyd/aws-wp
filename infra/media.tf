@@ -2,8 +2,9 @@
 #
 # WordPress keeps writing uploads to the shared file system exactly as it always
 # has - no plugin, no stream wrapper, nothing installed inside WordPress. A timer
-# mirrors them here, and CloudFront prefers this bucket over the instance for
-# anything under /wp-content/uploads/.
+# mirrors WordPress's year-folder media here, and CloudFront prefers this bucket
+# over the instance for /wp-content/uploads/20??/*. Plugin files elsewhere under
+# uploads are neither mirrored nor served from here.
 #
 # The mirror is for *serving*, not for durability: the file system remains the
 # source of truth, so an instance can be replaced mid-upload and lose nothing.

@@ -1,7 +1,7 @@
 # Backups for the shared file system.
 #
 # The database is covered by its own RDS automated backups, configured in
-# database.tf. This handles the other half of the state: everything on EFS.
+# database.tf. This handles the other half of the state: the file system.
 #
 # This replaces the ols-wp-backup scripts that earlier stages baked into the
 # AMI. Those dumped a local MariaDB and zipped /var/www, and neither assumption
@@ -37,7 +37,7 @@ resource "aws_backup_plan" "websites" {
     }
 
     recovery_point_tags = {
-      Name       = "WebsitesEfsRecoveryPoint"
+      Name       = "WebsitesFsxRecoveryPoint"
       CostCenter = "Bugfloyd/Websites/Storage"
     }
   }
@@ -94,6 +94,6 @@ resource "aws_backup_selection" "efs" {
 }
 
 output "backup_vault_name" {
-  description = "AWS Backup vault holding EFS recovery points"
+  description = "AWS Backup vault holding the file system's recovery points"
   value       = aws_backup_vault.websites.name
 }

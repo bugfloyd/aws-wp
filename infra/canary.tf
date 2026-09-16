@@ -1,7 +1,7 @@
 # A synthetic check against the origin.
 #
 # Every other alarm in this stack watches infrastructure: the instance's status
-# checks, RDS free storage, EFS burst credits. None of them notice the failure
+# checks, RDS free storage, FSx storage and throughput. None of them notice the failure
 # that actually happens, which is the web server coming up misconfigured while
 # the machine underneath it is fine. CloudFront makes that worse by continuing
 # to serve cached pages, so the site looks up from outside.

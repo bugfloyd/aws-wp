@@ -58,8 +58,9 @@ locals {
     # sync target it has no bucket policy for.
     media_buckets       = local.media_bucket_names
     media_sync_interval = var.media_sync_interval
-    # Stamped in so a config change produces a new launch template version and
-    # therefore a rolling refresh, rather than silently drifting.
+    # Stamped in so a change to any rendered config changes the user data, and
+    # user_data_replace_on_change then replaces the instance rather than leaving
+    # it running a configuration it no longer matches.
     config_revision = md5(join("", [local.httpd_config, local.vhost_config, local.admin_config]))
   })
 }

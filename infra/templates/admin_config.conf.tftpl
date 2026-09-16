@@ -1,9 +1,9 @@
 # OpenLiteSpeed WebAdmin.
 #
 # Bound to the loopback interface only. The console cannot persist a change
-# anyway - every instance is rebuilt from the launch template - so it exists
-# purely to inspect live state. Reaching it means an SSH local port-forward
-# over the EC2 Instance Connect Endpoint, which is IAM gated.
+# anyway - every instance is rebuilt from its user data - so it exists purely to
+# inspect live state. Reaching it means a Session Manager port forward, which is
+# IAM gated and needs no inbound rule.
 #
 # Keep to directives OpenLiteSpeed actually accepts here: anything it does not
 # recognise is a fatal configuration error, and the server refuses to start.

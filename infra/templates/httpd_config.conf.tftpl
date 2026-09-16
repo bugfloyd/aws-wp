@@ -1,8 +1,8 @@
 # OpenLiteSpeed server configuration, rendered at boot from Terraform values.
 #
 # Instances are disposable, so this file is regenerated on every launch rather
-# than edited in place. Anything changed through the WebAdmin console is lost at
-# the next instance refresh - that is intended, not a limitation to work around.
+# than edited in place. Anything changed through the WebAdmin console is lost when
+# the instance is next replaced - that is intended, not a limitation to work around.
 
 serverName                
 user                      www-data
@@ -15,9 +15,13 @@ gracefulRestartTimeout    300
 mime                      conf/mime.properties
 showVersionNumber         0
 
-# The load balancer terminates TLS and forwards over HTTP, so the client IP
-# arrives in X-Forwarded-For. Without this every request appears to come from
-# the load balancer, which breaks rate limiting and comment spam filtering.
+# 2 means "take the client address from X-Forwarded-For, but only when the
+# connection comes from a trusted IP". No trusted IPs are listed in
+# accessControl below, so in practice the header is never used: requests are
+# logged, and passed to PHP, with the address of the CloudFront edge that
+# connected. Trusting the header from every peer instead is not a safe fix on
+# its own - viewers can send their own X-Forwarded-For - so this is left as a
+# known gap rather than patched blindly.
 useIpInProxyHeader        2
 
 errorlog logs/error.log {
@@ -120,8 +124,8 @@ CGIRLimit  {
 
 # One PHP pool for the whole server rather than one per virtual host. Per-vhost
 # pools multiply the worker count - and therefore the database connections - by
-# the number of sites, which is exactly the ceiling problem in section 5a of the
-# plan. This keeps the budget flat as domains are added.
+# the number of sites, against a db.t4g.micro that allows about 85 connections.
+# This keeps the budget flat as domains are added.
 extprocessor lsphp {
   type                    lsapi
   address                 uds://tmp/lshttpd/lsphp.sock

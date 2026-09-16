@@ -2,21 +2,19 @@
 #
 # FSx for OpenZFS rather than EFS. Both are managed NFS; the difference is what
 # a single file operation costs. EFS is serverless and charges per GB with no
-# floor, but every call crosses a shared distributed service - measured here at
-# roughly 130 file creations per second against 21,500 on local disk. FSx is a
-# file server AWS operates, with provisioned disk and throughput and
-# sub-millisecond latency.
+# floor, but every call crosses a shared distributed service. FSx is a file
+# server AWS operates, with provisioned disk and throughput.
 #
-# That matters because a WordPress document root is unusually operation-heavy.
-# A plugin update deletes the old directory and unpacks the new one file by
-# file: about 30,000 operations for something the size of WooCommerce, which is
-# 225 seconds on EFS and roughly 9 on FSx. On EFS it exceeded CloudFront's
-# origin timeout and failed outright.
+# That matters because a WordPress document root is unusually operation-heavy:
+# a plugin update deletes the old directory and unpacks the new one file by
+# file. Measured on this workload, EFS created about 133 files a second and FSx
+# about 500, against some 23,000 on local disk. A 5,872-file WooCommerce install
+# takes roughly 90 seconds on EFS and 39 on FSx.
 #
 # The trade is a cost floor. FSx bills for provisioned capacity whether it is
 # used or not - about $24.64/month at the minimum Single-AZ configuration,
-# against $0.28 for the EFS it replaces. It is not cheaper than EFS until total
-# data passes roughly 82 GB; what it buys before that is speed.
+# against $0.30 for the same gigabyte on EFS. It is not cheaper than EFS until
+# total data passes roughly 82 GB; what it buys before that is speed.
 
 resource "aws_security_group" "fsx" {
   name        = "${var.stack_name}-fsx"
@@ -63,9 +61,9 @@ resource "aws_security_group" "fsx" {
 resource "aws_fsx_openzfs_file_system" "websites" {
   # SINGLE_AZ_1 deliberately. SINGLE_AZ_2 starts at 160 MB/s of throughput
   # against this one's 64, which is $45.76/month rather than $18.30 for capacity
-  # a low-traffic site will not use. Multi-AZ is $75.55 and belongs to v3, where
-  # instances span two zones and a single-zone file system becomes the single
-  # point of failure this stage accepts.
+  # a low-traffic site will not use. Multi-AZ is $75.55 and belongs to the
+  # Resilient stage, where instances span two zones and a single-zone file system
+  # becomes the single point of failure this stage accepts.
   deployment_type = "SINGLE_AZ_1"
   subnet_ids      = [aws_subnet.data_a.id]
 
