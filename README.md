@@ -45,7 +45,7 @@ Both use an S3 backend with native state locking (`use_lockfile`), configured th
                      |
           CloudFront + ACM  -- TLS terminates here
              |           \
-             |            \  /wp-content/uploads/*
+             |            \  /wp-content/uploads/20??/*
              |             S3 media bucket   --falls back on 403/404-->  instance
              | everything else, plain HTTP
    +---------v-----------+   public subnet
@@ -111,13 +111,22 @@ Two things about the mount look removable and are not:
 
 WordPress is untouched — no offload plugin, no stream wrapper. It keeps writing uploads to
 `wp-content/uploads` on the file system, which stays the source of truth. A systemd timer
-mirrors each site's uploads to its own S3 bucket every ten minutes, and CloudFront serves
-`/wp-content/uploads/*` from an **origin group**: the bucket first, the instance if the bucket
-does not have the file yet.
+mirrors each site's **media** to its own S3 bucket every ten minutes, and CloudFront serves
+`/wp-content/uploads/20??/*` from an **origin group**: the bucket first, the instance if the
+bucket does not have the file yet.
 
-So the sync interval is a performance knob, not a data-loss window. An upload made a minute
-ago is served by the instance; once mirrored, it is served by S3 and never reaches the web
-tier again.
+**Only the year folders, where WordPress keeps its own media.** Plugins write under
+`wp-content/uploads` too, and some regenerate a file in place under the same name: Elementor
+rewrites `elementor/css/post-6.css` and links it as `post-6.css?ver=<timestamp>`. Routed to the
+bucket, that file would be stale until the next sync and then cached under a policy that
+ignores query strings — an edited page keeping its old styles for a day. So everything outside
+the year folders goes through the default behavior instead: fresh from the file system, query
+strings in the cache key, and never copied into a bucket. The sync filter and the CloudFront
+path pattern have to match.
+
+So the sync interval is a performance knob, not a data-loss window. An image uploaded a
+minute ago is served by the instance; once mirrored, it is served by S3 and never reaches the
+web tier again.
 
 Details that decide whether this works:
 
