@@ -15,6 +15,17 @@ variable "stack_name" {
   }
 }
 
+variable "vpc_cidr" {
+  description = "VPC range, from which the public and data subnets are carved as /24s. Must be private address space, and must not overlap another VPC this one may need to peer with"
+  type        = string
+  default     = "10.20.0.0/16"
+
+  validation {
+    condition     = can(cidrhost(var.vpc_cidr, 0)) && tonumber(split("/", var.vpc_cidr)[1]) <= 16
+    error_message = "vpc_cidr must be a valid range of /16 or larger, so the /24 subnets fit."
+  }
+}
+
 variable "ols_image_id" {
   description = "The ID of the AMI to be used for EC2 instance"
   type        = string
@@ -49,6 +60,12 @@ variable "db_engine_version" {
   description = "MySQL major version, major.minor only so RDS applies the current patch release. Track the current LTS - a version past its RDS end of standard support is auto-enrolled in Extended Support and billed per vCPU-hour, which costs several times the instance itself"
   type        = string
   default     = "8.4"
+}
+
+variable "db_snapshot_identifier" {
+  description = "Create the database from this RDS snapshot rather than empty. Used when a new stack takes over an existing one's data; ignored once the database exists"
+  type        = string
+  default     = null
 }
 
 variable "db_instance_class" {

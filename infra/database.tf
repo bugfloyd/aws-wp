@@ -139,7 +139,15 @@ resource "aws_db_instance" "websites" {
 
   deletion_protection       = var.db_deletion_protection
   skip_final_snapshot       = var.db_skip_final_snapshot
-  final_snapshot_identifier = var.db_skip_final_snapshot ? null : "websites-mysql-final"
+  final_snapshot_identifier = var.db_skip_final_snapshot ? null : "${var.stack_name}-mysql-final"
+
+  # Create from a snapshot instead of empty. This is how a replacement stack takes
+  # over an existing database: per-site users and passwords live inside it, so they
+  # arrive intact and each site's wp-config.php only needs its DB_HOST changed.
+  #
+  # Create-only, so it is ignored afterwards; clearing the variable later must not
+  # read as "replace this database with an empty one".
+  snapshot_identifier = var.db_snapshot_identifier
 
   tags = {
     Name       = "WebsitesDatabase"
@@ -147,7 +155,7 @@ resource "aws_db_instance" "websites" {
   }
 
   lifecycle {
-    ignore_changes = [engine_lifecycle_support]
+    ignore_changes = [engine_lifecycle_support, snapshot_identifier]
   }
 }
 

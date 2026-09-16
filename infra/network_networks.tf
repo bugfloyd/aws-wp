@@ -1,5 +1,12 @@
+# A private range. The original 20.0.0.0/16 was public address space belonging to
+# Microsoft, so any request from inside the VPC to an address in it - an Azure-
+# hosted API a plugin calls, say - was routed locally and never left. It only
+# fails for the unlucky destination, which is what made it easy to miss.
+#
+# Subnets are carved from it rather than written out, so changing the range is one
+# variable. Changing it on a live stack replaces the VPC and everything in it.
 resource "aws_vpc" "bugfloyd" {
-  cidr_block           = "20.0.0.0/16"
+  cidr_block           = var.vpc_cidr
   enable_dns_support   = true
   enable_dns_hostnames = true
 
@@ -15,7 +22,7 @@ resource "aws_vpc" "bugfloyd" {
 # subnet plus NAT would.
 resource "aws_subnet" "public_a" {
   vpc_id                  = aws_vpc.bugfloyd.id
-  cidr_block              = "20.0.1.0/24"
+  cidr_block              = cidrsubnet(var.vpc_cidr, 8, 1)
   availability_zone       = data.aws_availability_zones.available.names[0]
   map_public_ip_on_launch = true
 
@@ -26,11 +33,11 @@ resource "aws_subnet" "public_a" {
 }
 
 # The data tier. RDS requires a subnet group spanning two Availability Zones
-# even for a single-AZ instance, so these come in a pair; EFS mount targets sit
-# here too. Neither needs a route off the VPC.
+# even for a single-AZ instance, so these come in a pair; the file system sits in
+# data_a. Neither needs a route off the VPC.
 resource "aws_subnet" "data_a" {
   vpc_id                  = aws_vpc.bugfloyd.id
-  cidr_block              = "20.0.21.0/24"
+  cidr_block              = cidrsubnet(var.vpc_cidr, 8, 21)
   availability_zone       = data.aws_availability_zones.available.names[0]
   map_public_ip_on_launch = false
 
@@ -42,7 +49,7 @@ resource "aws_subnet" "data_a" {
 
 resource "aws_subnet" "data_b" {
   vpc_id                  = aws_vpc.bugfloyd.id
-  cidr_block              = "20.0.22.0/24"
+  cidr_block              = cidrsubnet(var.vpc_cidr, 8, 22)
   availability_zone       = data.aws_availability_zones.available.names[1]
   map_public_ip_on_launch = false
 
