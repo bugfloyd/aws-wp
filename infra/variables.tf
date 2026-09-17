@@ -69,7 +69,7 @@ variable "db_snapshot_identifier" {
 }
 
 variable "db_instance_class" {
-  description = "RDS instance class. Note Performance Insights requires db.t4g.small or larger"
+  description = "RDS instance class. Note Performance Insights requires db.t4g.medium or larger"
   type        = string
   default     = "db.t4g.micro"
 }

@@ -90,7 +90,7 @@ resource "aws_db_instance" "websites" {
   #
   # A version past its RDS end of standard support is auto-enrolled and billed
   # per vCPU-hour: measured on this account, $0.118/vCPU-hr, which on a two-vCPU
-  # db.t4g.micro is $172/month against the instance's own $13. The first warning
+  # db.t4g.micro is $172/month against the instance's own $12.41. The first warning
   # is the bill, because nothing about the database looks any different.
   #
   # The trade is real: with Extended Support off, AWS performs the major version
@@ -133,8 +133,8 @@ resource "aws_db_instance" "websites" {
   maintenance_window      = "sun:03:30-sun:04:30"
   copy_tags_to_snapshot   = true
 
-  # Performance Insights is not offered on db.t4g.micro. It becomes available
-  # if the instance class is raised to db.t4g.small or larger.
+  # Performance Insights is not offered on db.t4g.micro or db.t4g.small. It becomes
+  # available if the instance class is raised to db.t4g.medium or larger.
   enabled_cloudwatch_logs_exports = ["error", "slowquery"]
 
   deletion_protection       = var.db_deletion_protection

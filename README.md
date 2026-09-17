@@ -31,7 +31,7 @@ it works, and how to operate, debug and recover it.
 | Stage | Tag | What it adds | Rough cost | Post |
 | ----- | --- | ------------ | ---------- | ---- |
 | Minimal | [`v1-minimal`](../../tree/v1-minimal) | One EC2 instance in a public subnet, Route 53 A-records straight to its IP, Let's Encrypt on the box. | ~$25/mo | [Beginners Guide: The Most Minimal & Cost-Effective Setup](https://bugfloyd.com/beginners-guide-minimal-wordpress-hosting-aws-terraform-openlitespeed) |
-| **Stateless** | [`v2-stateless`](../../tree/v2-stateless) | Files move to FSx for OpenZFS, the database to RDS, certificates to ACM behind CloudFront, and media is served from S3. The instance configures itself at boot and holds nothing — destroy it and rebuild and the site is unchanged. Still one instance. | ~$60/mo | _in progress_ |
+| **Stateless** | [`v2-stateless`](../../tree/v2-stateless) | Files move to FSx for OpenZFS, the database to RDS, certificates to ACM behind CloudFront, and media is served from S3. The instance configures itself at boot and holds nothing — destroy it and rebuild and the site is unchanged. Still one instance. | ~$57/mo | _in progress_ |
 | Scalable | _planned_ | Private subnets, a NAT gateway, an application load balancer and an Auto Scaling group. One instance becomes many. | ~$125/mo | _planned_ |
 | Resilient | _planned_ | Removes the single points of failure: instances across both AZs, a NAT gateway per AZ, RDS Multi-AZ and a Multi-AZ file system. | ~$225/mo | _planned_ |
 | Cached | _planned_ | ElastiCache plus the LiteSpeed Cache plugin. | ~$250/mo | _planned_ |
@@ -242,7 +242,7 @@ of failure. EBS attaches to one instance, and Multi-Attach needs a cluster file 
 
 **RDS MySQL 8.4** on `db.t4g.micro`, gp3, 20 GB autoscaling to 100 GB, encrypted, single-AZ, not
 publicly accessible, reachable on 3306 only from the web security group. MySQL rather than MariaDB
-so a later move to Aurora is an engine swap. Performance Insights needs `db.t4g.small` or larger.
+so a later move to Aurora is an engine swap. Performance Insights needs `db.t4g.medium` or larger.
 
 **RDS owns the master password** (`manage_master_user_password`): it lives in Secrets Manager, is
 rotated by RDS, and never appears in Terraform state. There is no `db_name`: the bootstrap creates
@@ -255,7 +255,7 @@ parameter any plugin creating a stored function fails with ERROR 1419.
 **`db_engine_version` is a variable, and Extended Support is refused at creation.** A MySQL version
 past its RDS end of standard support is enrolled in Extended Support automatically and billed per
 vCPU-hour — measured on this account at $0.118, which is $172 a month on a `db.t4g.micro` whose own
-cost is $13. `engine_lifecycle_support = "open-source-rds-extended-support-disabled"` makes AWS
+cost is $12.41. `engine_lifecycle_support = "open-source-rds-extended-support-disabled"` makes AWS
 upgrade the engine at end of support instead. RDS accepts that setting only at creation or
 snapshot restore, so it is ignored afterwards; the real protection on a running database is
 upgrading before the deadline.
@@ -945,27 +945,47 @@ yet been exercised on this stack; try it on a spare restore before relying on it
 
 ## Cost
 
-eu-west-1, on-demand prices before tax, for three low-traffic sites.
+Rates as billed to this account in eu-west-1 (Cost Explorer, September 2026), for one stack
+serving three low-traffic sites, 730 hours a month:
 
-| Item | Monthly |
-| ---- | ------- |
-| FSx for OpenZFS, Single-AZ, 64 GiB + 64 MB/s | ~$24.64 |
-| RDS `db.t4g.micro` + 20 GB gp3 | ~$16 |
-| EC2 `t3.micro` | ~$8.30 |
-| Public IPv4 address (the Elastic IP — charged whether or not attached) | ~$3.65 |
-| EBS root volume, 20 GB gp3 | ~$1.80 |
-| Route 53, three hosted zones at $0.50 each (alias queries to CloudFront are free) | ~$1.50 |
-| CloudFront, S3 (config, logs, media) | ~$1–2 |
-| Synthetics canary, hourly | ~$1.02 |
-| CloudWatch alarms (six metrics) and logs | ~$0.70 |
-| AWS Backup storage | < $1 |
-| Secrets Manager (the RDS master secret) | $0.40 |
-| **Total** | **~$60** |
+| Item | Billed rate | Monthly |
+| ---- | ----------- | ------- |
+| FSx for OpenZFS throughput, 64 MB/s | $0.286 per MB/s-month | $18.30 |
+| FSx for OpenZFS SSD storage, 64 GiB | $0.099 per GB-month | $6.34 |
+| RDS `db.t4g.micro` | $0.017 per hour | $12.41 |
+| RDS gp3 storage, 20 GB | $0.127 per GB-month | $2.54 |
+| EC2 `t3.micro` | $0.0114 per hour | $8.32 |
+| Public IPv4 address (the Elastic IP; billed whether or not attached) | $0.005 per hour | $3.65 |
+| EBS gp3 root volume, 20 GB | $0.088 per GB-month | $1.76 |
+| Route 53, three hosted zones | $0.50 per zone | $1.50 |
+| Synthetics canary, hourly | $0.0014 per run | $1.02 |
+| CloudWatch alarms, six alarm metrics | $0.10 per metric | $0.60 |
+| Secrets Manager, the RDS master secret | $0.40 per secret | $0.40 |
+| AMI snapshot, 8 GB | $0.05 per GB-month | ≤ $0.40 |
+| S3 (config, logs, media), CloudFront, DNS queries, backup storage | usage | < $0.50 |
+| **Total, before tax** | | **~$57** |
 
-The file system is the largest line, and it buys speed rather than savings. Two costs worth
-watching: **RDS Extended Support** ($172/month on this instance class, if the engine version
-lapses — see [Database](#database)), and **the canary schedule**, at $0.0014 a run. The bill barely
-moves as sites are added to the same stack.
+**Free tiers bring that down on a small account.** The first ten alarm metrics and the first 100
+canary runs each month are free, and CloudFront's always-free allowance (1 TB out, 10 million
+requests) covers these sites entirely — CloudFront has billed $0. One stack alone in this account
+bills about $56.
+
+**Charges that do not appear:**
+
+- **Data transfer.** CloudFront's fetches from an AWS origin are free, S3 in the same region is
+  free, and the instance, file system and database all sit in the same Availability Zone. A
+  database placed in the other zone costs $0.01 per GB each way; the stack that preceded this one
+  paid about $0.55 a month for that.
+- **Database backups.** RDS backup storage up to the provisioned size (20 GB) is free.
+- **File system backups** are billed at $0.05 per GB-month of backed-up data, which at about
+  430 MB compressed is cents.
+
+**Tax is added on top** — 21 % VAT on this account, which makes the total about $69.
+
+The file system is 43 % of the bill and buys speed, not savings. Adding sites to the same stack
+barely moves it: a site adds a hosted zone, a distribution and a bucket. Two costs worth watching:
+**RDS Extended Support** ($172 a month on this instance class if the engine version lapses — see
+[Database](#database)) and **the canary schedule** (see [Alerts](#alerts)).
 
 ---
 
