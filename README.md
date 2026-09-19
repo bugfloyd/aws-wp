@@ -493,7 +493,7 @@ Cost Explorer is queried in `us-east-1`.
 
 ### Deploying
 
-Both `hostedzones/` and `infra/` use an S3 backend with native locking, configured by a
+Every configuration here uses an S3 backend with native locking, configured by a
 `backend_config.hcl` that is not committed:
 
 ```hcl
@@ -501,8 +501,26 @@ region = "eu-west-1"
 bucket = "your-terraform-state-bucket"
 ```
 
-State keys are `hosted-zones-state/terraform.tfstate` and `aws-wp/infra/terraform.tfstate`; a
-named workspace stores its state under `env:/<workspace>/`.
+State keys are `hosted-zones-state/terraform.tfstate`, `aws-wp/infra/terraform.tfstate` and
+`aws-wp/state-backend/terraform.tfstate`; a named workspace stores its state under
+`env:/<workspace>/`.
+
+**The state buckets themselves are `state-backend/`.** It is the one configuration that has to
+exist before the others, so on a new account it runs with local state and then moves its own state
+into the bucket it just created:
+
+```sh
+cd state-backend
+terraform init
+terraform apply -var infra_state_bucket=<name> -var zones_state_bucket=<name>
+terraform init -backend-config backend_config.hcl -migrate-state
+```
+
+It keeps versioning on, which is the only way back from a corrupted or wrongly pushed state, and
+carries `prevent_destroy` on both buckets. There is deliberately no rule expiring old versions:
+they are the recovery path, and they can contain secrets, so they are purged deliberately rather
+than on a schedule. On an account where the buckets already exist, adopt them with `import` blocks
+instead of applying.
 
 **Hosted zones first**, deployed separately so domain records outlive the infrastructure — a
 `destroy` in `infra/` never touches DNS. Set `websites` to the list of domains, apply, and delegate
@@ -1045,6 +1063,7 @@ worth an AMI change once there are several instances.
 
 | Path | Contents |
 | ---- | -------- |
+| `state-backend/` | The S3 buckets holding every other configuration's state |
 | `hostedzones/` | Route 53 hosted zones, separate state |
 | `infra/backend.tf` | S3 backend, provider requirements |
 | `infra/main.tf` | Providers, the per-domain edge module |
