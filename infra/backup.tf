@@ -36,8 +36,10 @@ resource "aws_backup_plan" "websites" {
       delete_after = 30
     }
 
+    # Named by stack, so two stacks running side by side during a replacement
+    # do not show two identical sets of backups in the FSx console.
     recovery_point_tags = {
-      Name       = "WebsitesFsxRecoveryPoint"
+      Name       = "${var.stack_name}-fsx-daily"
       CostCenter = "Bugfloyd/Websites/Storage"
     }
   }

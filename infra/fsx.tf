@@ -77,6 +77,16 @@ resource "aws_fsx_openzfs_file_system" "websites" {
   # well would pay twice for the same recovery points.
   automatic_backup_retention_days = 0
 
+  # Deleting the file system still takes a final backup, which is worth having
+  # after a stack is replaced. It is a native FSx backup rather than a recovery
+  # point, so it sits outside the vault and never expires - and without these
+  # tags it has no name at all, which is how an orphan from a benchmark went
+  # unnoticed for three weeks. Only takes effect if applied before a destroy.
+  final_backup_tags = {
+    Name       = "${var.stack_name}-fsx-final"
+    CostCenter = "Bugfloyd/Websites/Storage"
+  }
+
   root_volume_configuration {
     # The document root is thousands of small PHP files that compress well and
     # are read far more often than written.

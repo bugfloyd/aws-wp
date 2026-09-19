@@ -971,9 +971,9 @@ terraform force-unlock <ID>
 | What | Backed up by | Schedule | Retention | Where |
 | ---- | ------------ | -------- | --------- | ----- |
 | Database | RDS automated backups, with point-in-time recovery | daily, 02:00–03:00 UTC, plus transaction logs | 30 days | RDS snapshots `rds:<stack_name>-mysql-<date>` |
-| File system (all sites' files and media) | AWS Backup | daily, 03:00 UTC (must start within an hour, finish within three) | 30 days | vault `<stack_name>-backup-vault` |
+| File system (all sites' files and media) | AWS Backup | daily, 03:00 UTC (must start within an hour, finish within three) | 30 days | vault `<stack_name>-backup-vault`, named `<stack_name>-fsx-daily` |
 | Database, on destroy | final snapshot, when `db_skip_final_snapshot = false` | once | until deleted | `<stack_name>-mysql-final` |
-| File system, on destroy | FSx final backup (`skip_final_backup` defaults to `false`) | once | until deleted | FSx backups, **outside the vault and without a name** |
+| File system, on destroy | FSx final backup (`skip_final_backup` defaults to `false`) | once | until deleted | FSx backups, **outside the vault**, named `<stack_name>-fsx-final` |
 | Manual database snapshots | you, with `aws rds create-db-snapshot` | before risky changes | until deleted | RDS snapshots |
 | OpenLiteSpeed configuration | S3 versioning | every apply | indefinite | the config bucket |
 | Terraform state | S3 versioning on the state bucket | every apply | indefinite | the state bucket |
@@ -989,9 +989,10 @@ The file system's own automatic backups are off (`automatic_backup_retention_day
 Backup is the single schedule; running both would pay twice for the same recovery points.
 
 **Destroying the file system leaves a final backup behind.** FSx takes one on deletion unless told
-not to. It is a native FSx backup, not an AWS Backup recovery point, so it carries no tags — it
-shows in the console with no name — sits outside the vault, and never expires. It is a useful
-safety net after replacing a stack; delete it deliberately once it is no longer needed:
+not to. It is a native FSx backup, not an AWS Backup recovery point, so it sits outside the vault
+and never expires. `final_backup_tags` names it `<stack_name>-fsx-final`; without them it would
+have no name at all, and it only takes effect if applied before the destroy. It is a useful safety
+net after replacing a stack; delete it deliberately once it is no longer needed:
 
 ```sh
 aws fsx describe-backups --query 'Backups[?Type==`USER_INITIATED`].[BackupId,CreationTime,FileSystem.FileSystemId]' --output table
@@ -1085,6 +1086,7 @@ version lapses — see [Database](#database)) and **the canary schedule** (see [
 
 | Gap | Detail |
 | --- | ------ |
+| **Any CloudFront distribution can reach the origin** | Port 80 admits CloudFront's managed prefix list, which covers every CloudFront distribution, not only this stack's. Someone could point their own distribution at `origin.<domain>` and serve the sites through it. Closing that takes a secret header CloudFront adds and the origin checks, or CloudFront VPC origins with the instance in a private subnet. |
 | **Visitor addresses are lost** | OpenLiteSpeed's `useIpInProxyHeader 2` uses `X-Forwarded-For` only from trusted IPs, and none are configured. Logs and PHP see the CloudFront edge's address, which affects comment IPs, spam filtering and rate limiting. Trusting the header from every peer is not a safe fix alone: viewers can send their own. A robust fix reads the `CloudFront-Viewer-Address` header, which CloudFront sets and viewers cannot. |
 | **PHP errors are not logged by default** | See [Logs](#logs) for capturing them per site. |
 | **The slow query log is off** | Exported to CloudWatch, never written. |
