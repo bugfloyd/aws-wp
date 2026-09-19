@@ -504,14 +504,28 @@ bucket = "your-terraform-state-bucket"
 State keys are `hosted-zones-state/terraform.tfstate` and `aws-wp/infra/terraform.tfstate`; a
 named workspace stores its state under `env:/<workspace>/`.
 
-**Hosted zones first**, deployed separately so domain records outlive the infrastructure. Set
-`websites` to the list of domains, apply, and delegate each domain to the name servers it outputs:
+**Hosted zones first**, deployed separately so domain records outlive the infrastructure — a
+`destroy` in `infra/` never touches DNS. Set `websites` to the list of domains, apply, and delegate
+each domain to the name servers it outputs:
 
 ```sh
 cd hostedzones
 terraform init -backend-config backend_config.hcl
 terraform apply
-terraform output hosted_zone_name_servers
+terraform output hosted_zone_name_servers   # delegate the domain to these
+terraform output hosted_zone_ids            # the IDs infra/ needs in `domains`
+```
+
+**A zone that already exists** — created by hand, or by a configuration being retired — is adopted
+rather than recreated. Add it to `websites`, write an `import` block for it, and check the plan
+says *import* and *update in place* and never *create*: a recreated zone gets new name servers and
+the domain stops resolving until the registrar is updated.
+
+```hcl
+import {
+  to = aws_route53_zone.this["example.com"]
+  id = "Z0123456789ABCDEFGHIJ"
+}
 ```
 
 **Then the stack.** `infra/terraform.tfvars` needs at least:
