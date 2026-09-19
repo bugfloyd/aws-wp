@@ -30,4 +30,15 @@ index  {
 rewrite  {
   enable                  1
   autoLoadHtaccess        1
+%{ if origin_secret != "" ~}
+  # Refuse anything that did not come through one of this stack's CloudFront
+  # distributions, which add the origin secret header. The instance's own
+  # requests - wp-cron, the bootstrap's health check, debugging on the box -
+  # arrive over the loopback interface and are let through.
+  rules                   <<<END_rules
+RewriteCond %%{REMOTE_ADDR} !^127\.0\.0\.1$
+RewriteCond %%{HTTP:X-Origin-Verify} !^${origin_secret}$
+RewriteRule ^ - [F]
+  END_rules
+%{ endif ~}
 }

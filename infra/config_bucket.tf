@@ -57,7 +57,7 @@ resource "aws_s3_object" "vhost_config" {
   key          = "ols/vhconf.conf"
   content      = local.vhost_config
   content_type = "text/plain"
-  etag         = md5(local.vhost_config)
+  etag         = nonsensitive(md5(sensitive(local.vhost_config)))
 }
 
 resource "aws_s3_object" "admin_config" {

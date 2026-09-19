@@ -21,8 +21,9 @@ resource "aws_cloudfront_distribution" "cloudfront" {
     # Plain HTTP to the origin. CloudFront terminates TLS with an ACM
     # certificate, so the instance holds no certificate and has nothing to
     # renew - which is the third kind of state this stage removes, after files
-    # and the database. The origin is protected by a security group locked to
-    # CloudFront's own prefix list rather than by a shared secret header.
+    # and the database. The origin is protected twice: a security group locked
+    # to CloudFront's prefix list, and the secret header below, because that
+    # prefix list admits every CloudFront distribution, not only this one.
     custom_origin_config {
       http_port                = var.origin_http_port
       https_port               = 443
@@ -36,6 +37,13 @@ resource "aws_cloudfront_distribution" "cloudfront" {
       # takes about 39 seconds on FSx. At the 30-second default a large update
       # surfaces as a CloudFront 504 with no clue as to why.
       origin_read_timeout = var.origin_read_timeout
+    }
+
+    # Custom headers belong to the origin, so the media behavior's fallback to
+    # the instance carries it too. CloudFront overwrites any copy a viewer sends.
+    custom_header {
+      name  = "X-Origin-Verify"
+      value = var.origin_secret
     }
   }
 

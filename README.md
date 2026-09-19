@@ -62,7 +62,7 @@ Figures for unbuilt stages are estimates carried forward from this stage's measu
                     v   plain HTTP, port 80      v
               origin.<domain>  ->  Elastic IP
    +---------------------------------------------------+   public subnet  10.20.1.0/24
-   | EC2 t3.micro, OpenLiteSpeed + LSPHP 8.3           |   port 80 from CloudFront only
+   | EC2 t3.micro, OpenLiteSpeed + LSPHP 8.3           |   port 80 from CloudFront + secret
    | configures itself at boot from user data          |   port 22 from admin_ips
    | timers: wp-cron 1 min, media sync 10 min          | --> S3 media buckets
    +----------------+-------------------+---------------+
@@ -117,6 +117,7 @@ takes the default behavior like any other request, served fresh from the file sy
 | WebAdmin password | Parameter Store `/<stack_name>/ols/admin-password` | `bootstrap.tf` |
 | Media buckets, origin access control | `<stack_name>-<domain, dots as hyphens>-media`, `<stack_name>-media<edge_policy_suffix>` | `media.tf` |
 | Certificates, distributions, DNS records, cache policies | per domain | `cert_cloudfront_dns/` |
+| Origin secret | `random_password.origin_secret`, sent as `X-Origin-Verify`, checked by a virtual host rewrite rule | `main.tf`, `cert_cloudfront_dns/cloudfront.tf`, `templates/vhconf.conf.tftpl` |
 | CloudFront logs and canary artifacts | S3 bucket `cloudfront_logging_bucket_name` | `logging_bucket.tf` |
 | Backups | vault `<stack_name>-backup-vault`, plan `<stack_name>-daily`, role `<stack_name>-backup-role` | `backup.tf` |
 | Alarms, SNS topic | `<stack_name>-*`, topic `<stack_name>-alerts` | `alerts.tf`, `fsx.tf`, `canary.tf` |
@@ -155,9 +156,17 @@ origin is plain HTTP. Certificates are state: a renewal job on a disposable inst
 waiting to happen, and ACM renews by itself. Minimum TLS 1.2, SNI only, HTTP/2, IPv4 only,
 viewers redirected to HTTPS.
 
-**The origin is locked by security group, not a shared secret.** Port 80 accepts only
-`com.amazonaws.global.cloudfront.origin-facing`, AWS's managed prefix list. The instance is
-publicly routable and not publicly reachable.
+**The origin is locked twice: by security group and by a shared secret.** Port 80 accepts only
+`com.amazonaws.global.cloudfront.origin-facing`, AWS's managed prefix list — but that list covers
+every CloudFront distribution in AWS, not only this stack's, so on its own anyone could point a
+distribution of theirs at `origin.<domain>` and serve the sites through it. So each of this stack's
+distributions adds an `X-Origin-Verify` header carrying a random 40-character value, and
+OpenLiteSpeed answers 403 to any request without it — pages and static files alike. The instance's
+own requests over the loopback interface are exempt: wp-cron, the bootstrap's health check, and
+debugging on the box. Custom headers belong to the origin, so the media fallback carries it too, and
+CloudFront overwrites any copy a viewer sends. The value lives in Terraform state, in each
+distribution's configuration, and in the rendered virtual host config in the config bucket; plans
+show it as sensitive.
 
 **The default behavior caches whatever WordPress allows.** Its cache policy keys on `Host`,
 `Options` and all query strings, never cookies; TTL 0 / 1 day / 1 year (min / default / max);
@@ -477,6 +486,11 @@ the command early without an error, and the sync then runs with no filter and no
   `UsedStorageCapacity` in bytes.
 - **The conditional ownership check.** A recursive `chown` over NFS is a round trip per file; run
   on every boot it held a replacement's bootstrap for minutes.
+- **The loopback exemption in the origin-secret rule.** Without it wp-cron and the bootstrap's
+  health check, which call the instance directly, would be refused like any other request that
+  lacks the header.
+- **`enforce_origin_secret`.** It looks like a debugging switch, and it is the only safe way to
+  add or rotate the secret on a running stack — see [Changing configuration](#changing-configuration).
 - **`depends_on` from the log bucket's ACL to its ownership controls.** Buckets default to
   `BucketOwnerEnforced`, which rejects ACLs, and CloudFront's standard logging needs the
   `log-delivery-write` ACL.
@@ -688,6 +702,20 @@ OpenLiteSpeed**, or OPcache may keep running the old version for up to fifteen m
 ```sh
 sudo /usr/local/lsws/bin/lswsctrl stop; sudo /usr/local/lsws/bin/lswsctrl start
 ```
+
+**Rotating the origin secret** takes three applies. CloudFront needs several minutes to deploy a new
+value to every edge location, and an instance that already enforces a value the edges do not yet
+send answers 403 to all uncached traffic:
+
+```sh
+terraform apply -var enforce_origin_secret=false          # instance replaced, check off
+terraform apply -var enforce_origin_secret=false -replace=random_password.origin_secret
+aws cloudfront wait distribution-deployed --id <id>       # for each distribution
+terraform apply                                           # instance replaced, check on
+```
+
+The same last two steps added the header to this stack when it was first introduced. A stack built
+from scratch needs none of it: its distributions carry the header from the moment they exist.
 
 **Rotating the WebAdmin password:** the bootstrap reads it at boot, so replace both together:
 `terraform apply -replace=random_password.ols_admin -replace=aws_instance.webserver`.
@@ -952,6 +980,14 @@ file edited in place (WordPress never does this) needs its path invalidated too.
 `sudo /usr/local/bin/wp-media-sync.sh` by hand; check `/etc/wp-media-sync.conf`; confirm the mount.
 The script exits silently if another instance holds its lock.
 
+**Every uncached request returns 403 through CloudFront, but the instance works locally.** The
+origin secret does not match — typically a rotation applied in one step, or distributions still
+deploying a new value. OpenLiteSpeed's 403 is an HTML page titled `403 Forbidden`, where S3's is an
+XML `AccessDenied`. Requests over `127.0.0.1` are exempt, so they keep working and prove the site
+itself is fine; the refused requests show in the site's access log as 403s from CloudFront edge
+addresses. Turning the check off restores service while the cause is found:
+`terraform apply -var enforce_origin_secret=false`.
+
 **No alarm emails.** Check the subscription (see [Alerts](#alerts)).
 
 **Terraform reports a held lock after an interrupted apply.** Make sure no Terraform process is
@@ -1086,7 +1122,6 @@ version lapses — see [Database](#database)) and **the canary schedule** (see [
 
 | Gap | Detail |
 | --- | ------ |
-| **Any CloudFront distribution can reach the origin** | Port 80 admits CloudFront's managed prefix list, which covers every CloudFront distribution, not only this stack's. Someone could point their own distribution at `origin.<domain>` and serve the sites through it. Closing that takes a secret header CloudFront adds and the origin checks, or CloudFront VPC origins with the instance in a private subnet. |
 | **Visitor addresses are lost** | OpenLiteSpeed's `useIpInProxyHeader 2` uses `X-Forwarded-For` only from trusted IPs, and none are configured. Logs and PHP see the CloudFront edge's address, which affects comment IPs, spam filtering and rate limiting. Trusting the header from every peer is not a safe fix alone: viewers can send their own. A robust fix reads the `CloudFront-Viewer-Address` header, which CloudFront sets and viewers cannot. |
 | **PHP errors are not logged by default** | See [Logs](#logs) for capturing them per site. |
 | **The slow query log is off** | Exported to CloudWatch, never written. |
@@ -1107,10 +1142,38 @@ Constraints the current code imposes on what comes next:
 
 | Stage | Changes | Notes |
 | ----- | ------- | ----- |
-| Scalable | Private subnets, NAT gateway, ALB, launch template, Auto Scaling group | An early version is on the `v3-scalable` branch, forked from the first stage and still on EFS, so it is a starting point to rebuild on this stage rather than something to merge. The instance moves off its Elastic IP and behind the load balancer, which restores a real health check and can replace a failed instance. The protocol shim already honours `X-Forwarded-Proto`. The first site's `*` listener mapping lets a load balancer's health check, which addresses the target by IP, reach a site. Cron and media sync already elect a single runner across instances. |
+| Scalable | Private subnets, NAT gateway, ALB, launch template, Auto Scaling group | The instance moves off its Elastic IP and behind the load balancer, which restores a real health check and can replace a failed instance — see below. The protocol shim already honours `X-Forwarded-Proto`. The first site's `*` listener mapping lets a load balancer's health check, which addresses the target by IP, reach a site. Cron and media sync already elect a single runner across instances. |
 | Resilient | Instances across AZs, NAT per AZ, `multi_az = true`, Multi-AZ FSx | RDS Multi-AZ is an in-place modify, but the `availability_zone` pin has to go in the same change: RDS rejects the two together. FSx Single-AZ to Multi-AZ ($75.55/month) is a new file system, and the data moves with DataSync. |
 | Cached | ElastiCache per AZ in the data subnets, LiteSpeed Cache plugin | The data subnets are `/24`s, with ample room beside RDS. The server cache module is present with `enableCache = 0` (`enable_ols_cache`), so enabling it is a value change. A page cache on each instance goes stale across instances: let CloudFront be the shared page cache and purge on publish, or accept a short TTL. Do not put the cache root on the shared file system. LiteSpeed Cache rather than W3 Total Cache, because it drives the server's own cache module. |
 | Reference | Aurora with a read replica, read/write splitting (HyperDB), dashboard | The one stage with a data migration: Aurora is built from an RDS snapshot, or as an Aurora read replica that is promoted, not modified in place. `DB_HOST` is written into each site's `wp-config.php` only at install, so an endpoint change is a rewrite of each config plus an OpenLiteSpeed restart — not a template change. |
+
+### Carrying into the Scalable stage
+
+An earlier load balancer and Auto Scaling draft, since deleted, established these:
+
+- **The origin-secret check moves from OpenLiteSpeed to the load balancer.** A listener rule
+  forwards only requests carrying `X-Origin-Verify`, and the listener's default action is a fixed
+  403. The virtual host rewrite rule has to go in the same change: load balancer health checks
+  do not carry the header and do not come from loopback, so the rule would fail every one of them,
+  mark every target unhealthy, and have the group replace instances forever. CloudFront's custom
+  header moves to the load balancer origin, and the load balancer's security group keeps the
+  CloudFront prefix list. `enforce_origin_secret` goes with the rule.
+- **Or drop the secret entirely with CloudFront VPC origins.** An internal load balancer in the
+  private subnets, reached by CloudFront privately, has no public address to protect. It needs the
+  NAT gateway this stage adds anyway, for the instances' outbound traffic. It removes the load
+  balancer's public addresses but not the NAT gateway's.
+- **Instance refresh at a desired capacity of one** needs a minimum healthy percentage of 100 and
+  a maximum of 200, with `max_size` at least one above the desired capacity. Anything lower lets
+  the group terminate the only instance before its replacement is in service, so every
+  configuration change becomes an outage.
+- **Health checks that tolerate provisioning:** check `/` accepting 200-399, not
+  `/wp-login.php` — the bootstrap's placeholder page passes at once and a fresh WordPress redirects
+  to its installer — with a grace period of about 600 seconds. Too short and the group kills
+  instances mid-bootstrap, which never resolves on its own.
+- **The web tier stays in one Availability Zone** until the Resilient stage. Instances in two
+  zones while the database and NAT gateway sit in one is theatre.
+- **The load balancer's certificate** reuses the CloudFront certificate's DNS validation records,
+  which ACM issues identically per domain per account.
 
 Graviton (arm64) is not yet supported by the AMI build, which is x86-only — its SSM agent package,
 for one, is the `amd64` build. It saves about 20 % per instance and becomes worth an AMI change

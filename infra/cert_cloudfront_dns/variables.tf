@@ -36,6 +36,12 @@ variable "policy_suffix" {
   default     = ""
 }
 
+variable "origin_secret" {
+  description = "Sent to the instance in X-Origin-Verify, proving a request came from this stack's distributions rather than merely from CloudFront"
+  type        = string
+  sensitive   = true
+}
+
 variable "origin_read_timeout" {
   description = "Seconds CloudFront waits for the origin to respond. 120 is the default account quota"
   type        = number

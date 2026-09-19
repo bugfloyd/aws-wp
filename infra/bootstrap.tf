@@ -31,7 +31,8 @@ locals {
   # Rendered once with a placeholder rather than per domain; the bootstrap loop
   # substitutes the real domain for each site it sets up.
   vhost_config = templatefile("${path.module}/templates/vhconf.conf.tftpl", {
-    domain = "__DOMAIN__"
+    domain        = "__DOMAIN__"
+    origin_secret = var.enforce_origin_secret ? random_password.origin_secret.result : ""
   })
 
   httpd_config = templatefile("${path.module}/templates/httpd_config.conf.tftpl", {
@@ -61,7 +62,12 @@ locals {
     # Stamped in so a change to any rendered config changes the user data, and
     # user_data_replace_on_change then replaces the instance rather than leaving
     # it running a configuration it no longer matches.
-    config_revision = md5(join("", [local.httpd_config, local.vhost_config, local.admin_config]))
+    #
+    # The vhost config carries the origin secret, which would mark this hash -
+    # and with it the whole user data - sensitive, hiding every bootstrap change
+    # from plans. A hash of a 40-character random secret inside a larger file
+    # reveals nothing, so it is declared safe to show.
+    config_revision = nonsensitive(md5(sensitive(join("", [local.httpd_config, local.vhost_config, local.admin_config]))))
   })
 }
 

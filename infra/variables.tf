@@ -232,6 +232,12 @@ variable "origin_read_timeout" {
   }
 }
 
+variable "enforce_origin_secret" {
+  description = "Make OpenLiteSpeed refuse requests that lack the origin secret header. Turn off for the apply that first adds the header to existing distributions, and while rotating it: CloudFront takes minutes to deploy a change everywhere, and an instance that enforces before every edge sends the right value answers live traffic with 403"
+  type        = bool
+  default     = true
+}
+
 variable "enable_edge" {
   description = "Create the per-domain ACM certificates, CloudFront distributions and DNS records. Set false to build the server without claiming domains a live stack still serves"
   type        = bool
