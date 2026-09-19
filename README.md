@@ -31,7 +31,7 @@ it works, and how to operate, debug and recover it.
 | Stage | Tag | What it adds | Rough cost | Post |
 | ----- | --- | ------------ | ---------- | ---- |
 | Minimal | [`v1-minimal`](../../tree/v1-minimal) | One EC2 instance in a public subnet, Route 53 A-records straight to its IP, Let's Encrypt on the box. | ~$25/mo | [Beginners Guide: The Most Minimal & Cost-Effective Setup](https://bugfloyd.com/beginners-guide-minimal-wordpress-hosting-aws-terraform-openlitespeed) |
-| **Stateless** | [`v2-stateless`](../../tree/v2-stateless) | Files move to FSx for OpenZFS, the database to RDS, certificates to ACM behind CloudFront, and media is served from S3. The instance configures itself at boot and holds nothing — destroy it and rebuild and the site is unchanged. Still one instance. | ~$57/mo | _in progress_ |
+| **Stateless** | [`v2-stateless`](../../tree/v2-stateless) | Files move to FSx for OpenZFS, the database to RDS, certificates to ACM behind CloudFront, and media is served from S3. The instance configures itself at boot and holds nothing — destroy it and rebuild and the site is unchanged. Still one instance. | ~$58/mo | _in progress_ |
 | Scalable | _planned_ | Private subnets, a NAT gateway, an application load balancer and an Auto Scaling group. One instance becomes many. | ~$125/mo | _planned_ |
 | Resilient | _planned_ | Removes the single points of failure: instances across both AZs, a NAT gateway per AZ, RDS Multi-AZ and a Multi-AZ file system. | ~$225/mo | _planned_ |
 | Cached | _planned_ | ElastiCache plus the LiteSpeed Cache plugin. | ~$250/mo | _planned_ |
@@ -945,8 +945,9 @@ yet been exercised on this stack; try it on a spare restore before relying on it
 
 ## Cost
 
-Rates as billed to this account in eu-west-1 (Cost Explorer, September 2026), for one stack
-serving three low-traffic sites, 730 hours a month:
+Measured, not estimated: the rates below are what AWS billed this account in eu-west-1, and the
+monthly figures come from a full metered day (2026-09-17) with this stack's usage isolated from
+the account's other resources. About **$58 a month before tax**, for three low-traffic sites.
 
 | Item | Billed rate | Monthly |
 | ---- | ----------- | ------- |
@@ -958,34 +959,37 @@ serving three low-traffic sites, 730 hours a month:
 | Public IPv4 address (the Elastic IP; billed whether or not attached) | $0.005 per hour | $3.65 |
 | EBS gp3 root volume, 20 GB | $0.088 per GB-month | $1.76 |
 | Route 53, three hosted zones | $0.50 per zone | $1.50 |
-| Synthetics canary, hourly | $0.0014 per run | $1.02 |
-| CloudWatch alarms, six alarm metrics | $0.10 per metric | $0.60 |
+| Canary runs, hourly | $0.0014 per run | $1.02 |
+| Canary metrics, 14 of them | $0.30 per metric-month | $4.20, less 10 free: **$1.20** |
+| CloudWatch alarms, six alarm metrics | $0.10 per alarm-month | $0.60, less 10 free: **$0** |
 | Secrets Manager, the RDS master secret | $0.40 per secret | $0.40 |
-| AMI snapshot, 8 GB | $0.05 per GB-month | ≤ $0.40 |
-| S3 (config, logs, media), CloudFront, DNS queries, backup storage | usage | < $0.50 |
-| **Total, before tax** | | **~$57** |
+| AMI snapshot, 8 GB | $0.05 per GB-month | ~$0.20 |
+| S3 storage and requests, DNS queries, FSx backup storage | usage | ~$0.30 |
+| CloudFront | 1 TB and 10M requests free | $0 |
+| **Total, before tax** | | **~$58** |
 
-**Free tiers bring that down on a small account.** The first ten alarm metrics and the first 100
-canary runs each month are free, and CloudFront's always-free allowance (1 TB out, 10 million
-requests) covers these sites entirely — CloudFront has billed $0. One stack alone in this account
-bills about $56.
+**Free tiers do a lot of work here**, and they are account-wide, so a busier account pays list:
+$62 rather than $58. The ten free custom metrics and ten free alarms are the difference.
+
+**The canary costs more in metrics than in runs.** It publishes eight canary-level metrics plus a
+`Duration` and a `SuccessPercent` per site, so each site added is $0.60 a month more in metrics —
+more than the site's share of the runs. Lowering `canary_schedule_expression` does not touch that half.
 
 **Charges that do not appear:**
 
 - **Data transfer.** CloudFront's fetches from an AWS origin are free, S3 in the same region is
-  free, and the instance, file system and database all sit in the same Availability Zone. A
-  database placed in the other zone costs $0.01 per GB each way; the stack that preceded this one
-  paid about $0.55 a month for that.
-- **Database backups.** RDS backup storage up to the provisioned size (20 GB) is free.
-- **File system backups** are billed at $0.05 per GB-month of backed-up data, which at about
-  430 MB compressed is cents.
+  free, and the instance, file system and database are pinned to one Availability Zone. A database
+  in the other zone pays $0.01 per GB each way — about $0.55 a month on the stack this replaced,
+  which is why `availability_zone` is set.
+- **Database backups.** RDS backup storage up to the provisioned 20 GB is free.
+- **File system backups** cost $0.05 per GB-month, about $0.06 at this data size.
 
-**Tax is added on top** — 21 % VAT on this account, which makes the total about $69.
+**Tax comes on top** — 21 % VAT on this account, making it about $70.
 
-The file system is 43 % of the bill and buys speed, not savings. Adding sites to the same stack
-barely moves it: a site adds a hosted zone, a distribution and a bucket. Two costs worth watching:
-**RDS Extended Support** ($172 a month on this instance class if the engine version lapses — see
-[Database](#database)) and **the canary schedule** (see [Alerts](#alerts)).
+The file system is 42 % of the bill and buys speed, not savings. Adding a site to an existing
+stack costs a hosted zone, two canary metrics and some requests — about $1.20 a month. Two costs
+worth watching: **RDS Extended Support** ($172 a month on this instance class if the engine
+version lapses — see [Database](#database)) and **the canary schedule** (see [Alerts](#alerts)).
 
 ---
 
