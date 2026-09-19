@@ -67,7 +67,7 @@ locals {
     # and with it the whole user data - sensitive, hiding every bootstrap change
     # from plans. A hash of a 40-character random secret inside a larger file
     # reveals nothing, so it is declared safe to show.
-    config_revision = nonsensitive(md5(sensitive(join("", [local.httpd_config, local.vhost_config, local.admin_config]))))
+    config_revision = nonsensitive(md5(sensitive(join("", [local.httpd_config, local.vhost_config, local.admin_config, local.edge_cache_guard]))))
   })
 }
 

@@ -30,12 +30,6 @@ variable "origin_http_port" {
   default     = 80
 }
 
-variable "policy_suffix" {
-  description = "Appended to CloudFront cache and origin request policy names. These are unique account-wide, so a replacement stack running alongside an existing one needs its own"
-  type        = string
-  default     = ""
-}
-
 variable "origin_secret" {
   description = "Sent to the instance in X-Origin-Verify, proving a request came from this stack's distributions rather than merely from CloudFront"
   type        = string
@@ -55,5 +49,25 @@ variable "media_bucket_regional_domain_name" {
 
 variable "media_oac_id" {
   description = "Origin Access Control that lets this distribution read the media bucket"
+  type        = string
+}
+
+variable "pages_cache_policy_id" {
+  description = "Shared cache policy for pages, on the default behavior"
+  type        = string
+}
+
+variable "origin_request_policy_id" {
+  description = "Shared origin request policy: every cookie, query string and viewer header reaches WordPress"
+  type        = string
+}
+
+variable "viewer_request_function_arn" {
+  description = "CloudFront Function that marks personal requests and blocks public cron and XML-RPC"
+  type        = string
+}
+
+variable "viewer_response_function_arn" {
+  description = "CloudFront Function that tells browsers no-cache for pages CloudFront keeps with stale directives"
   type        = string
 }

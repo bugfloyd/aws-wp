@@ -67,3 +67,13 @@ resource "aws_s3_object" "admin_config" {
   content_type = "text/plain"
   etag         = md5(local.admin_config)
 }
+
+# Edge caching rules for PHP responses, loaded before every request through
+# auto_prepend_file. See templates/edge_cache.php.tftpl.
+resource "aws_s3_object" "edge_cache_guard" {
+  bucket       = aws_s3_bucket.config.id
+  key          = "php/edge-cache.php"
+  content      = local.edge_cache_guard
+  content_type = "text/plain"
+  etag         = md5(local.edge_cache_guard)
+}

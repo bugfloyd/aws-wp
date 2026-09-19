@@ -82,6 +82,8 @@ resource "aws_cloudfront_distribution" "cloudfront" {
     }
   }
 
+  # Pages. Shared cache for anonymous visitors; the viewer request function
+  # takes anyone with a personal cookie out of it (see edge_cache.tf).
   default_cache_behavior {
     target_origin_id       = "EC2Origin"
     viewer_protocol_policy = "redirect-to-https"
@@ -89,10 +91,20 @@ resource "aws_cloudfront_distribution" "cloudfront" {
     allowed_methods = ["HEAD", "DELETE", "POST", "GET", "OPTIONS", "PUT", "PATCH"]
     cached_methods  = ["GET", "HEAD", "OPTIONS"]
 
-    cache_policy_id          = var.disable_cache ? "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" : aws_cloudfront_cache_policy.cache_policy.id
-    origin_request_policy_id = aws_cloudfront_origin_request_policy.origin_request_policy.id
+    cache_policy_id          = var.disable_cache ? local.caching_disabled : var.pages_cache_policy_id
+    origin_request_policy_id = var.origin_request_policy_id
 
     compress = true
+
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = var.viewer_request_function_arn
+    }
+
+    function_association {
+      event_type   = "viewer-response"
+      function_arn = var.viewer_response_function_arn
+    }
   }
 
   # Uploads come from the bucket when it has them, and from the instance when it
@@ -124,6 +136,69 @@ resource "aws_cloudfront_distribution" "cloudfront" {
     cache_policy_id = "658327ea-f89d-4fab-a63d-7e88639e58f6"
   }
 
+  # Never cached, whatever the response headers or cookies say. WordPress already
+  # sends no-cache from most of these, but a plugin that forgets to cannot turn a
+  # dashboard, a login form or an API answer into a shared page.
+  #
+  # The admin screens, admin-ajax.php included.
+  ordered_cache_behavior {
+    path_pattern             = "/wp-admin/*"
+    target_origin_id         = "EC2Origin"
+    viewer_protocol_policy   = "redirect-to-https"
+    allowed_methods          = ["HEAD", "DELETE", "POST", "GET", "OPTIONS", "PUT", "PATCH"]
+    cached_methods           = ["GET", "HEAD"]
+    cache_policy_id          = local.caching_disabled
+    origin_request_policy_id = var.origin_request_policy_id
+    compress                 = true
+
+    function_association {
+      event_type   = "viewer-response"
+      function_arn = var.viewer_response_function_arn
+    }
+  }
+
+  # Every PHP file named wp-*: login, comment posting, signup, activation - and
+  # wp-cron.php, which the viewer request function refuses outright. "*" spans
+  # slashes, so this also catches PHP endpoints under wp-content and wp-includes.
+  ordered_cache_behavior {
+    path_pattern             = "/wp-*.php"
+    target_origin_id         = "EC2Origin"
+    viewer_protocol_policy   = "redirect-to-https"
+    allowed_methods          = ["HEAD", "DELETE", "POST", "GET", "OPTIONS", "PUT", "PATCH"]
+    cached_methods           = ["GET", "HEAD"]
+    cache_policy_id          = local.caching_disabled
+    origin_request_policy_id = var.origin_request_policy_id
+    compress                 = true
+
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = var.viewer_request_function_arn
+    }
+
+    function_association {
+      event_type   = "viewer-response"
+      function_arn = var.viewer_response_function_arn
+    }
+  }
+
+  # The REST API. Anonymous answers can differ per visitor in ways WordPress
+  # does not mark, and stale data breaks the editors and forms that call it.
+  ordered_cache_behavior {
+    path_pattern             = "/wp-json/*"
+    target_origin_id         = "EC2Origin"
+    viewer_protocol_policy   = "redirect-to-https"
+    allowed_methods          = ["HEAD", "DELETE", "POST", "GET", "OPTIONS", "PUT", "PATCH"]
+    cached_methods           = ["GET", "HEAD"]
+    cache_policy_id          = local.caching_disabled
+    origin_request_policy_id = var.origin_request_policy_id
+    compress                 = true
+
+    function_association {
+      event_type   = "viewer-response"
+      function_arn = var.viewer_response_function_arn
+    }
+  }
+
   viewer_certificate {
     acm_certificate_arn      = aws_acm_certificate_validation.cert_validation.certificate_arn
     ssl_support_method       = "sni-only"
@@ -146,76 +221,6 @@ resource "aws_cloudfront_distribution" "cloudfront" {
     Name       = "${var.domain}-CloudFrontDistribution"
     CostCenter = "Bugfloyd/Websites/CloudFront"
   })
-}
-
-resource "aws_cloudfront_cache_policy" "cache_policy" {
-  name = "${replace(var.domain, ".", "_")}-cache-policy${var.policy_suffix}"
-
-  default_ttl = 86400
-  max_ttl     = 31536000
-  min_ttl     = 0
-
-  parameters_in_cache_key_and_forwarded_to_origin {
-    cookies_config {
-      cookie_behavior = "none"
-    }
-
-    headers_config {
-      header_behavior = "whitelist"
-      headers {
-        items = ["Host", "Options"]
-      }
-    }
-
-    query_strings_config {
-      query_string_behavior = "all"
-    }
-
-    enable_accept_encoding_brotli = true
-    enable_accept_encoding_gzip   = true
-  }
-}
-
-resource "aws_cloudfront_origin_request_policy" "origin_request_policy" {
-  name = "${replace(var.domain, ".", "_")}-origin-policy${var.policy_suffix}"
-
-  cookies_config {
-    cookie_behavior = "all"
-  }
-
-  headers_config {
-    header_behavior = "allViewerAndWhitelistCloudFront"
-    headers {
-      items = [
-        "CloudFront-Forwarded-Proto",
-        "CloudFront-Viewer-Http-Version",
-        "CloudFront-Is-Android-Viewer",
-        "CloudFront-Is-Desktop-Viewer",
-        "CloudFront-Is-IOS-Viewer",
-        "CloudFront-Is-Mobile-Viewer",
-        "CloudFront-Is-SmartTV-Viewer",
-        "CloudFront-Is-Tablet-Viewer",
-        "CloudFront-Viewer-Address",
-        "CloudFront-Viewer-ASN",
-        "CloudFront-Viewer-City",
-        "CloudFront-Viewer-Country",
-        "CloudFront-Viewer-Country-Name",
-        "CloudFront-Viewer-Country-Region",
-        "CloudFront-Viewer-Country-Region-Name",
-        "CloudFront-Viewer-Http-Version",
-        "CloudFront-Viewer-Latitude",
-        "CloudFront-Viewer-Longitude",
-        "CloudFront-Viewer-Metro-Code",
-        "CloudFront-Viewer-Postal-Code",
-        "CloudFront-Viewer-Time-Zone",
-        "CloudFront-Viewer-TLS",
-      ]
-    }
-  }
-
-  query_strings_config {
-    query_string_behavior = "all"
-  }
 }
 
 resource "aws_route53_record" "main_dns_record" {

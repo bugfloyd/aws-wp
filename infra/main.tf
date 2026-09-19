@@ -46,16 +46,19 @@ module "websites_cert_cloudfront_dns" {
   logging_bucket     = aws_s3_bucket.cloudfront_logging_bucket.id
   instance_public_ip = aws_eip.webserver.public_ip
   origin_http_port   = var.webserver_http_port
-  # Cache at the edge: a 24 hour default TTL on a custom policy. WordPress sends no-cache on admin and logged-in responses, so those
-  # still reach the origin. Disabling the cache would send every request to a
-  # single small instance, which is the opposite of the point.
+  # Cache at the edge, on the rules in edge_cache.tf. Disabling it would send
+  # every request to a single small instance, which is the opposite of the point.
   disable_cache       = false
   origin_read_timeout = var.origin_read_timeout
 
   media_bucket_regional_domain_name = aws_s3_bucket.media[each.key].bucket_regional_domain_name
   media_oac_id                      = aws_cloudfront_origin_access_control.media.id
-  policy_suffix                     = var.edge_policy_suffix
   origin_secret                     = random_password.origin_secret.result
+
+  pages_cache_policy_id        = aws_cloudfront_cache_policy.pages.id
+  origin_request_policy_id     = aws_cloudfront_origin_request_policy.origin.id
+  viewer_request_function_arn  = aws_cloudfront_function.viewer_request.arn
+  viewer_response_function_arn = aws_cloudfront_function.viewer_response.arn
 
   providers = {
     aws.us_east_1 = aws.us_east_1

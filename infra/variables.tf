@@ -232,6 +232,67 @@ variable "origin_read_timeout" {
   }
 }
 
+variable "page_cache_ttl" {
+  description = "Seconds CloudFront keeps a public page before asking the origin again. Also the default TTL for responses that carry no Cache-Control"
+  type        = number
+  default     = 420
+
+  validation {
+    condition     = var.page_cache_ttl >= 0
+    error_message = "page_cache_ttl cannot be negative."
+  }
+}
+
+variable "page_stale_while_revalidate" {
+  description = "Seconds after page_cache_ttl during which CloudFront answers with the old copy while it refreshes in the background. The oldest page a visitor can get is page_cache_ttl plus this"
+  type        = number
+  default     = 86400
+}
+
+variable "page_stale_if_error" {
+  description = "Seconds CloudFront may keep serving an expired page while the origin is failing, such as during an instance replacement"
+  type        = number
+  default     = 86400
+}
+
+variable "cache_bypass_cookie_prefixes" {
+  description = "Cookie name prefixes that mark a request as personal: it is never served from the cache and its response is never shared. WordPress core, WooCommerce and Easy Digital Downloads by default; extend it for plugins with their own session cookies"
+  type        = list(string)
+  default = [
+    "wordpress_logged_in_",
+    "wordpress_sec_",
+    "wp-postpass_",
+    "comment_author_",
+    "wordpress_no_cache",
+    "woocommerce_items_in_cart",
+    "woocommerce_cart_hash",
+    "wp_woocommerce_session_",
+    "edd_items_in_cart",
+  ]
+
+  validation {
+    condition     = length(var.cache_bypass_cookie_prefixes) > 0 && alltrue([for p in var.cache_bypass_cookie_prefixes : length(p) > 3])
+    error_message = "List at least one prefix, each longer than three characters; a short prefix would match unrelated cookies."
+  }
+}
+
+variable "cache_ignored_query_strings" {
+  description = "Query string parameters left out of the page cache key, so campaign links share one cached copy. They are still forwarded to WordPress on every origin request. A cache policy takes at most 10"
+  type        = list(string)
+  default     = ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "gclid", "fbclid", "msclkid", "_gl", "mc_cid"]
+
+  validation {
+    condition     = length(var.cache_ignored_query_strings) <= 10
+    error_message = "A CloudFront cache policy accepts at most 10 query string names."
+  }
+}
+
+variable "edge_blocked_files" {
+  description = "File names CloudFront answers with 403 wherever they appear in a path. wp-cron.php because cron runs on the instance itself; xmlrpc.php because nothing here uses it and it is a common brute-force target. Remove xmlrpc.php for the WordPress mobile app, Jetpack or pingbacks"
+  type        = list(string)
+  default     = ["wp-cron.php", "xmlrpc.php"]
+}
+
 variable "enforce_origin_secret" {
   description = "Make OpenLiteSpeed refuse requests that lack the origin secret header. Turn off for the apply that first adds the header to existing distributions, and while rotating it: CloudFront takes minutes to deploy a change everywhere, and an instance that enforces before every edge sends the right value answers live traffic with 403"
   type        = bool
@@ -251,7 +312,7 @@ variable "key_pair_name" {
 }
 
 variable "edge_policy_suffix" {
-  description = "Suffix for CloudFront cache and origin request policy names, which are unique account-wide. Separate from stack_name because these are the one set of names that has to differ from a stack being replaced while both are live - the old distributions keep their policies until they are deleted"
+  description = "Suffix for the names of CloudFront cache and origin request policies, CloudFront Functions and the origin access control, which are unique account-wide. They already carry stack_name; this is for two generations of a stack that share one, since the old distributions keep their policies and functions until they are deleted"
   type        = string
   default     = ""
 }

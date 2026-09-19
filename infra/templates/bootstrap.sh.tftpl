@@ -156,6 +156,21 @@ else
   echo "WARNING: no PHP scan directory found; PHP settings not applied" >&2
 fi
 
+# Edge caching rules, loaded before every PHP request on the server.
+#
+# Outside every document root and not a WordPress plugin: it decides what
+# CloudFront may cache - never a response that sets a cookie, public pages for a
+# short TTL - just before the headers leave. The file goes in place before the
+# setting that loads it, because PHP fails every request if auto_prepend_file
+# names a file that does not exist.
+if [ -n "$PHP_SCAN_DIR" ] && [ -d "$PHP_SCAN_DIR" ]; then
+  install -d -m 0755 /usr/local/lib/wp-edge
+  aws s3 cp "s3://$CONFIG_BUCKET/php/edge-cache.php" /usr/local/lib/wp-edge/edge-cache.php --region "$REGION" --quiet
+  chmod 0644 /usr/local/lib/wp-edge/edge-cache.php
+  echo "auto_prepend_file = /usr/local/lib/wp-edge/edge-cache.php" > "$PHP_SCAN_DIR/zz-edge-cache.ini"
+  echo "Edge caching rules installed"
+fi
+
 # WP-CLI.
 #
 # The admin panel drives updates through CloudFront, which caps how long it will

@@ -51,7 +51,7 @@ Figures for unbuilt stages are estimates carried forward from this stage's measu
 ```
                          Route 53  (apex and www alias records per site)
                             |
-                 CloudFront + ACM certificate            TLS terminates here
+                 CloudFront + ACM + edge functions       TLS terminates here
                     |                         \
    everything else  |                          \  /wp-content/uploads/20??/*
    Host forwarded   |                           \
@@ -78,23 +78,53 @@ Figures for unbuilt stages are estimates carried forward from this stage's measu
 
 ### What serves a request
 
-**A page, an admin screen, anything dynamic** goes through CloudFront's default behavior to the
-instance. The viewer's `Host` header, all cookies and all query strings are forwarded, so
-OpenLiteSpeed picks the right site and WordPress sees the request as sent.
+**Pages and anything dynamic** go through CloudFront's default behavior to the instance. The
+viewer's `Host`, every cookie and every query string are forwarded, so OpenLiteSpeed picks the
+right site and WordPress sees the request as sent.
 
-What CloudFront keeps depends on the response's own headers:
+Before CloudFront looks in its cache, a viewer request function decides whether the request may
+share a cached copy with everyone else:
 
-| Response | Cached at the edge for |
-| -------- | ---------------------- |
-| Admin screens, `wp-login.php`, 404s, anything for a logged-in user (WordPress sends `no-cache`) | not cached |
-| Images, CSS, JavaScript and fonts from the instance (OpenLiteSpeed sends `max-age=604800`) | 7 days |
-| Public pages and feeds (WordPress sends no cache headers) | 24 hours, the policy's default |
-| Year-folder media from S3 (no cache headers, AWS managed CachingOptimized policy) | 24 hours |
+| Visitor | Pages | Static files and media |
+| ------- | ----- | ---------------------- |
+| Anonymous | one shared copy per page | shared |
+| Logged in, any role | never cached: always from WordPress, admin bar and all | shared |
+| Commenter who saved their details | never cached: sees their own comment at once, and their name and email never reach anyone else | shared |
+| Visitor who unlocked a password-protected post | never cached | shared |
+| Shop customer with a cart or session (WooCommerce, Easy Digital Downloads) | never cached | shared |
 
-**A published or edited post can take up to a day to appear to visitors** unless the cache is
-invalidated (see [Debugging](#debugging)). Query strings are part of the cache key, so theme and
-plugin assets versioned with `?ver=` change as soon as the version does. Cookies are not part of
-the key: a logged-in user can be served the cached public copy of a page, without the admin bar.
+*Never cached* means the request gets a cache key no other request will ever have: it is never
+answered from the cache, and nothing its response produces is served to anyone else. What marks a
+request as personal is a cookie from `cache_bypass_cookie_prefixes` — WordPress's logged-in,
+commenter and post-password cookies, and the WooCommerce and Easy Digital Downloads cart and
+session cookies. Analytics and consent cookies do not count.
+
+Some paths are never cached at all, whatever the headers or cookies say: `/wp-admin/*`
+(`admin-ajax.php` included), every `/wp-*.php` (login, comment posting, signup) and the REST API
+(`/wp-json/*`, and `?rest_route=` on any page).
+
+How long the rest is kept is decided at the origin, by a guard that runs before every PHP request:
+
+| Response | CloudFront keeps it | The browser is told |
+| -------- | ------------------- | ------------------- |
+| Public page, feed, sitemap, `robots.txt`, permanent redirect | 7 minutes, then up to a day more while refreshing, and while the origin is failing | `no-cache` |
+| Anything that sets a cookie | never | `no-store` |
+| Logged-in pages, password-protected posts, 404s (WordPress's own `no-cache`) | never | as WordPress says |
+| Temporary redirects, errors | never | `no-store` |
+| Images, CSS, JavaScript and fonts from the instance | 7 days (OpenLiteSpeed's `max-age=604800`) | the same |
+| Year-folder media from S3 | 1 day (AWS managed CachingOptimized) | the same |
+
+**An edit reaches visitors within about 7 minutes.** After the 7 minutes the next visitor gets the
+old copy instantly while CloudFront fetches the new one, so on a quiet page it can take one more
+visit; logged-in users see changes at once. The same old copy keeps answering while the origin is
+failing, which is what keeps cached pages up during an instance replacement. **Browsers never keep
+pages themselves** — they are told `no-cache` — so a browser cannot show its own anonymous copy
+after its user logs in.
+
+**Tracking parameters** — `utm_source`, `utm_medium`, `utm_campaign`, `utm_term`, `utm_content`,
+`gclid`, `fbclid`, `msclkid`, `_gl`, `mc_cid` — are left out of the cache key, so campaign links
+share one cached copy. They still reach WordPress on every request that goes to the origin. Every
+other query string is part of the key, `?ver=` asset versions included.
 
 **WordPress media** — anything under `/wp-content/uploads/20??/` — goes to an origin group. The
 site's S3 bucket answers first; if it does not have the file yet, CloudFront retries the same
@@ -116,7 +146,9 @@ takes the default behavior like any other request, served fresh from the file sy
 | Rendered OpenLiteSpeed config | S3 bucket `config_bucket_name`, prefix `ols/` | `config_bucket.tf`, `bootstrap.tf` |
 | WebAdmin password | Parameter Store `/<stack_name>/ols/admin-password` | `bootstrap.tf` |
 | Media buckets, origin access control | `<stack_name>-<domain, dots as hyphens>-media`, `<stack_name>-media<edge_policy_suffix>` | `media.tf` |
-| Certificates, distributions, DNS records, cache policies | per domain | `cert_cloudfront_dns/` |
+| Certificates, distributions, DNS records | per domain | `cert_cloudfront_dns/` |
+| Edge caching rules | functions `<stack_name>-viewer-request` and `-viewer-response`, cache policy `<stack_name>-pages`, origin request policy `<stack_name>-origin` — one of each, shared by every site | `edge_cache.tf`, `templates/viewer_request.js.tftpl`, `templates/viewer_response.js` |
+| Origin caching guard | `php/edge-cache.php` in the config bucket, loaded before every PHP request | `edge_cache.tf`, `templates/edge_cache.php.tftpl` |
 | Origin secret | `random_password.origin_secret`, sent as `X-Origin-Verify`, checked by a virtual host rewrite rule | `main.tf`, `cert_cloudfront_dns/cloudfront.tf`, `templates/vhconf.conf.tftpl` |
 | CloudFront logs and canary artifacts | S3 bucket `cloudfront_logging_bucket_name` | `logging_bucket.tf` |
 | Backups | vault `<stack_name>-backup-vault`, plan `<stack_name>-daily`, role `<stack_name>-backup-role` | `backup.tf` |
@@ -168,12 +200,48 @@ CloudFront overwrites any copy a viewer sends. The value lives in Terraform stat
 distribution's configuration, and in the rendered virtual host config in the config bucket; plans
 show it as sensitive.
 
-**The default behavior caches whatever WordPress allows.** Its cache policy keys on `Host`,
-`Options` and all query strings, never cookies; TTL 0 / 1 day / 1 year (min / default / max);
-gzip and Brotli. Its origin request policy forwards all viewer headers, all cookies, all query
-strings and the CloudFront viewer headers. WordPress's own `no-cache` on admin and logged-in
-responses keeps those out of the cache; everything else is cached, which is what keeps one
-small instance enough.
+**Caching is decided in four layers**, each covering what the one before cannot. The first and
+last are enough for most requests; the middle two exist because WordPress and its plugins do not
+reliably say what may be shared.
+
+1. **A viewer request function** marks personal requests (see
+   [What serves a request](#what-serves-a-request)). It has to be a function: CloudFront cache
+   policies take cookie names literally, with no wildcards, and WordPress suffixes its cookies with a
+   per-site hash. Exact names would need a cache policy per site, and an account holds only 20 custom
+   cache policies — a ceiling on the number of sites. One function, one cache policy and one origin
+   request policy serve every distribution instead. A personal request gets a key no other request
+   will have, rather than its session cookie in the key, so nothing personal is reused even if a
+   plugin forgets to say `no-cache`.
+2. **Paths that are never cached**: `/wp-admin/*`, `/wp-*.php` and `/wp-json/*`, with AWS's managed
+   CachingDisabled policy. WordPress already sends `no-cache` from most of them; a plugin that forgets
+   cannot turn a dashboard, a login form or an API answer into a shared page. The REST API is never
+   cached even for anonymous visitors, because its answers can differ per visitor in ways WordPress
+   does not mark, and stale answers break the editors and forms that call it.
+3. **An origin guard** — `templates/edge_cache.php.tftpl`, loaded before every PHP request through
+   `auto_prepend_file` from outside every document root; not a WordPress plugin. It makes two
+   decisions WordPress leaves open. A response that sets a cookie is never cached: CloudFront stores
+   `Set-Cookie` with the object and replays it on every hit, which was proven on this stack by a test
+   page whose one random cookie went to every visitor after the first. And a public page gets an
+   explicit TTL with `stale-while-revalidate` and `stale-if-error`, instead of CloudFront's default.
+4. **WordPress's own `no-cache`** for logged-in pages, password-protected posts and 404s, which
+   CloudFront honours because the minimum TTL is 0.
+
+A **viewer response function** then rewrites what browsers are told about pages to `no-cache`.
+Browsers honour `stale-while-revalidate` too, and a browser showing its own day-old copy — the
+anonymous version of a page after logging in — is the kind of mix-up the rest exists to prevent.
+
+**Tracking parameters are excluded from the cache key but still forwarded.** The cache policy
+includes every query string except the ten in `cache_ignored_query_strings`; the origin request
+policy forwards all of them. Stripping them in the function would have removed them from what
+WordPress receives, too.
+
+**`/wp-cron.php` and `/xmlrpc.php` answer 403 at the edge**, wherever they appear in a path and in
+any case (`edge_blocked_files`). Cron does not need the public URL: it runs every minute from the
+instance itself over loopback, and a public `wp-cron.php` only lets anyone trigger it. XML-RPC is a
+common brute-force and amplification target that nothing here uses. **What this breaks:** the
+WordPress mobile apps and desktop editors that publish over XML-RPC, Jetpack (which connects over
+XML-RPC), and pingbacks and trackbacks from other sites. To use any of them, remove `xmlrpc.php`
+from the list.
 
 **CloudFront reaches the instance as `origin.<domain>`**, a per-site A record for the Elastic IP,
 and OpenLiteSpeed lists that name for its site. The media behavior cannot forward the viewer's
@@ -363,7 +431,7 @@ stack in the same account — staging, or a replacement for production — is on
 
 | Name unique across | Resources | Handled by |
 | ------------------ | --------- | ---------- |
-| The account | IAM roles, policies, instance profile; CloudFront cache and origin request policies; the origin access control | `stack_name`, plus `edge_policy_suffix` for the CloudFront policies |
+| The account | IAM roles, policies, instance profile; CloudFront cache and origin request policies, CloudFront Functions, the origin access control | `stack_name`, plus `edge_policy_suffix` for the CloudFront ones |
 | The region | RDS instance, subnet and parameter groups; SNS topic; alarms; backup vault and plan; SSM parameter; key pair; canary | `stack_name` |
 | The VPC | security groups | nothing needed — every stack builds its own VPC |
 | All of AWS | S3 buckets | media buckets embed the domain; the config and log bucket names are variables |
@@ -397,7 +465,7 @@ Everything below runs from `infra/templates/bootstrap.sh.tftpl`, logged to
    Parameter Store
 5. **WebAdmin** — write the password hash, fetch `ols/admin_config.conf` from the config bucket
 6. **Server configuration** — fetch `ols/httpd_config.conf` and the virtual host template, write
-   the PHP drop-in, install WP-CLI and `wp-site`
+   the PHP drop-in, install the origin caching guard, install WP-CLI and `wp-site`
 7. **Per-site setup**, holding `/var/www/.bootstrap.lock` (waits up to ten minutes). For each
    domain: render its virtual host config and create its `html` and `logs` directories. If it has
    a `wp-config.php`, correct ownership only if wrong and move on. Otherwise put up a placeholder
@@ -428,6 +496,7 @@ site answered; without that line, the `curl:` errors before `wp-bootstrap finish
 | `/usr/local/lsws/conf/vhosts/<domain>/vhconf.conf` | per-site config, rendered at boot |
 | `/usr/local/lsws/admin/conf/admin_config.conf` | WebAdmin config |
 | `/usr/local/lsws/lsphp83/etc/php/8.3/mods-available/zz-wordpress.ini` | PHP settings |
+| `/usr/local/lib/wp-edge/edge-cache.php`, `mods-available/zz-edge-cache.ini` | the origin caching guard, and the `auto_prepend_file` line that loads it |
 | `/usr/local/bin/wp`, `/usr/local/bin/wp-site` | WP-CLI and its wrapper |
 | `/usr/local/bin/wp-cron-runner.sh`, `wp-media-sync.sh` | the two scheduled jobs |
 | `/etc/wp-media-sync.conf` | `domain=bucket`, one per line |
@@ -500,6 +569,13 @@ the command early without an error, and the sync then runs with no filter and no
 - **The loopback exemption in the origin-secret rule.** Without it wp-cron and the bootstrap's
   health check, which call the instance directly, would be refused like any other request that
   lacks the header.
+- **The order the bootstrap installs the caching guard in.** The file goes in place before the
+  `auto_prepend_file` line that loads it: PHP fails every request if that setting names a file that
+  does not exist.
+- **The viewer response function.** Without it browsers receive `stale-while-revalidate` and can
+  show their own day-old copy of a page — including an anonymous copy after logging in.
+- **The static-file exemption in the viewer request function.** Without it every logged-in page
+  view would also refetch the theme's CSS and JavaScript from the origin.
 - **`enforce_origin_secret`.** It looks like a debugging switch, and it is the only safe way to
   add or rotate the secret on a running stack — see [Changing configuration](#changing-configuration).
 - **`depends_on` from the log bucket's ACL to its ownership controls.** Buckets default to
@@ -727,6 +803,20 @@ terraform apply                                           # instance replaced, c
 
 The same last two steps added the header to this stack when it was first introduced. A stack built
 from scratch needs none of it: its distributions carry the header from the moment they exist.
+
+**Tuning the cache.** Every rule is a variable:
+
+| Variable | Default | Changes |
+| -------- | ------- | ------- |
+| `page_cache_ttl` | 420 | seconds a public page stays fresh at the edge |
+| `page_stale_while_revalidate` | 86400 | how long after that the old copy answers while CloudFront refreshes |
+| `page_stale_if_error` | 86400 | how long the old copy answers while the origin is failing |
+| `cache_bypass_cookie_prefixes` | WordPress, WooCommerce, EDD | cookies that make a request personal — add a plugin's own session cookie here |
+| `cache_ignored_query_strings` | ten tracking parameters | query strings left out of the cache key (at most 10) |
+| `edge_blocked_files` | `wp-cron.php`, `xmlrpc.php` | file names answered with 403 at the edge |
+
+The three page timings live in the origin guard, so changing them replaces the instance; the other
+three only update the CloudFront function or policy.
 
 **Rotating the WebAdmin password:** the bootstrap reads it at boot, so replace both together:
 `terraform apply -replace=random_password.ols_admin -replace=aws_instance.webserver`.
@@ -975,7 +1065,26 @@ listener map in `/usr/local/lsws/conf/httpd_config.conf`.
 **A new image is broken for a few minutes.** It is waiting for the next sync and the instance
 fallback failed; see the previous entry. To mirror at once: `sudo systemctl start wp-media-sync.service`.
 
-**A change does not show up for visitors.** Public pages are cached for 24 hours and static files
+**Reading `x-cache`.** `Hit from cloudfront` is a cached copy; `Miss` went to the origin — and a
+personal request is always a `Miss`; `FunctionGeneratedResponse` is the viewer request function
+answering by itself (the 403 for a blocked file). `Age` is how old the cached copy is: a `Hit` with
+an `Age` above `page_cache_ttl` is a stale copy, served while CloudFront refreshes in the background
+or while the origin is failing. To see what the origin itself says, ask it
+over loopback on the instance:
+
+```sh
+curl -s -o /dev/null -D - -H 'Host: <domain>' -H 'CloudFront-Forwarded-Proto: https' http://127.0.0.1/<path> | grep -i cache-control
+```
+
+**Logged in, but seeing the public page.** A logged-in request is always a `Miss`. If it is a `Hit`,
+the request carries no cookie from `cache_bypass_cookie_prefixes` — a login plugin with a session
+cookie of its own, say. Add its prefix.
+
+**A page is cached that should not be** — a plugin shows per-visitor content without a cookie and
+without `no-cache`. Give it a personal cookie prefix, or have the plugin send `no-cache`; if the
+page sets a cookie, the guard already stops it being cached.
+
+**A change does not show up for visitors.** Public pages stay fresh for 7 minutes and static files
 for seven days (see [What serves a request](#what-serves-a-request)); a logged-in editor bypasses
 the cache and sees the change at once. Invalidate what changed, or the whole site:
 
@@ -1102,6 +1211,7 @@ the account's other resources. About **$58 a month before tax**, for three low-t
 | AMI snapshot, 8 GB | $0.05 per GB-month | ~$0.20 |
 | S3 storage and requests, DNS queries, FSx backup storage | usage | ~$0.30 |
 | CloudFront | 1 TB and 10M requests free | $0 |
+| CloudFront Functions, two per page request | 2M invocations free, then $0.10 per million | $0 |
 | **Total, before tax** | | **~$58** |
 
 **Free tiers do a lot of work here**, and they are account-wide, so a busier account pays list:
@@ -1137,7 +1247,7 @@ version lapses — see [Database](#database)) and **the canary schedule** (see [
 | **PHP errors are not logged by default** | See [Logs](#logs) for capturing them per site. |
 | **The slow query log is off** | Exported to CloudWatch, never written. |
 | **Nothing replaces a broken instance** | EC2's default automatic recovery moves the instance to healthy hardware when its host fails, but a broken OS or web server is only reported, by the canary. No Auto Scaling group acts on it until the Scalable stage. |
-| **Content changes wait on the edge cache** | Public pages stay cached for up to 24 hours after an edit unless invalidated. Nothing purges CloudFront on publish. |
+| **Content changes wait on the edge cache** | An edit or an approved comment reaches anonymous visitors within about 7 minutes, and on a quiet page one visit later. Nothing purges CloudFront on publish; a WordPress plugin that invalidates the changed pages from the instance's role (C3 CloudFront Cache Controller, for one) would make it immediate, at the cost of a plugin inside WordPress and CloudFront permissions on the instance. |
 | **Single Availability Zone** | The instance, the file system and the database each live in one zone. The Resilient stage fixes it. |
 | **A false alarm per instance replacement** | See [Alerts](#alerts). |
 | **Server logs do not survive replacement** | Per-site logs live on the file system; the bootstrap and server logs do not. |
@@ -1183,6 +1293,12 @@ An earlier load balancer and Auto Scaling draft, since deleted, established thes
   instances mid-bootstrap, which never resolves on its own.
 - **The web tier stays in one Availability Zone** until the Resilient stage. Instances in two
   zones while the database and NAT gateway sit in one is theatre.
+- **The edge caching layers carry over unchanged.** The functions and policies live in CloudFront,
+  and the origin guard is installed by the bootstrap on every instance.
+- **Verify single-runner locking with two instances.** Cron, media sync and first-time WordPress
+  installs each take a non-blocking `flock` on the shared file system, so exactly one instance runs
+  them. That design is in place but has only ever run on one instance: confirm with two that one
+  runs each tick and the other exits, and that a lock held by a terminated instance is released.
 - **The load balancer's certificate** reuses the CloudFront certificate's DNS validation records,
   which ACM issues identically per domain per account.
 
