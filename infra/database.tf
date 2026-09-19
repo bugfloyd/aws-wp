@@ -127,6 +127,15 @@ resource "aws_db_instance" "websites" {
   # which is an in-place modify with a brief failover and no data migration.
   multi_az = false
 
+  # Same zone as the instance and the file system, which is worth pinning rather
+  # than leaving to chance: RDS picks any zone in the subnet group, and one that
+  # lands in the other zone pays cross-AZ transfer on every query - $0.01/GB each
+  # way, about $0.55/month on the stack this one replaced. Changing it later
+  # replaces the database, so it is set now while it already matches.
+  #
+  # Must be dropped when multi_az becomes true: RDS rejects both together.
+  availability_zone = aws_subnet.data_a.availability_zone
+
   apply_immediately       = var.db_apply_immediately
   backup_retention_period = var.db_backup_retention_days
   backup_window           = "02:00-03:00"
