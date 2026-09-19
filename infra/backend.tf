@@ -1,6 +1,9 @@
 terraform {
   backend "s3" {
-    key          = "bugfloyd-state/terraform.tfstate"
+    # Namespaced to this project. "bugfloyd-state/" is bugfloyd-infra's own
+    # production state key, so a generic name risks a stack adopting another
+    # stack's resources the moment both point at the same bucket.
+    key          = "aws-wp/infra/terraform.tfstate"
     encrypt      = true
     use_lockfile = true
   }
@@ -8,7 +11,15 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.88"
+      version = "~> 6.0"
+    }
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.7"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.7"
     }
   }
 
