@@ -206,7 +206,9 @@ operation, not throughput.
 FSx buys speed, not savings: EFS stays cheaper until total data passes roughly 82 GB. The file
 system is `SINGLE_AZ_1` — `SINGLE_AZ_2` starts at 160 MB/s of throughput, well over twice the
 cost — with 64 GiB of SSD, 64 MB/s, ZSTD compression and encryption at rest. Multi-AZ is
-$75.55/month and belongs to the Resilient stage.
+$75.55/month and belongs to the Resilient stage. FSx's advertised sub-millisecond latency describes
+the disk; a metadata operation over NFS measures about 2 ms, which is why OPcache's revalidation
+interval matters (see [Instance](#instance)).
 
 **Mounted at `:/fsx` over NFS 4.2, without `noresvport`.** FSx exports the root volume at `/fsx`,
 not `/`. Its exports default to `secure`, requiring a privileged source port, and `noresvport` —
@@ -219,7 +221,8 @@ WordPress.** WordPress writes uploads to the file system, which stays the source
 takes cold media requests off the web tier — a large library is cold at most edge locations most
 of the time — and keeps media available while the instance is replaced. Because the instance
 answers anything the bucket lacks, the sync interval is a performance knob, never a data-loss
-window.
+window. Every media file lives in both places: the bucket is a serving copy, so it does not reduce
+what the file system stores.
 
 **Only year folders go to S3.** WordPress keeps its own media in `uploads/YYYY/MM/` and never
 edits a file in place. Plugins also write under `uploads`, and some regenerate a file under the
@@ -227,7 +230,11 @@ same name with a `?ver=` query string to bust caches — Elementor's `elementor/
 one. The media behavior's cache policy (AWS managed CachingOptimized) ignores query strings, and
 the bucket would hold a stale copy until the next sync. So the CloudFront path pattern
 (`/wp-content/uploads/20??/*`) and the sync filter (`20[0-9][0-9]/*`) match each other and nothing
-else; plugin files never reach a bucket.
+else; plugin files never reach a bucket. That matters for privacy as much as freshness: plugins keep
+things under `uploads` that were never meant for a public bucket — form attachments, protected
+downloads, backup dumps. A site with WordPress's "organize uploads into month- and year-based
+folders" setting turned off keeps its media at the root of `uploads`, which the instance then
+serves: slower, never wrong.
 
 **The failover criteria include 403.** Each bucket's policy grants CloudFront `s3:GetObject` and
 not `s3:ListBucket`, and S3 will not confirm to such a caller whether a key exists: a missing
@@ -236,16 +243,20 @@ object is `AccessDenied`. A criteria list of `[404]` never fails over. The crite
 
 **One media bucket per site per environment**, named `<stack_name>-<domain>-media` with the
 domain's dots as hyphens (`wp-prod-naz-li-media`): private,
-SSE-S3, incomplete multipart uploads aborted after seven days. A staging stack pointed at a
-production bucket would delete production media on its first sync, which is why the stack name
-is part of the bucket name.
+SSE-S3, Standard storage class, incomplete multipart uploads aborted after seven days. The instance
+writes through its own role, scoped to the media buckets only — there are no access keys anywhere.
+One origin access control serves every bucket, and each bucket's policy names the one distribution
+allowed to read it. A staging stack pointed at a production bucket would delete production media on
+its first sync, which is why the stack name is part of the bucket name.
 
 **Rejected alternatives.** An offload plugin (WP Offload Media and similar) puts behavior inside
 every WordPress install, and "remove local copies" breaks anything that reads media back from PHP.
 Mounting a bucket (s3fs, rclone, Mountpoint for S3) fails on semantics — S3 has no rename, partial
 writes or POSIX locks, all of which WordPress and this stack use — and routes every media miss
 through the instance anyway. A self-managed NFS server adds a component to patch and a single point
-of failure. EBS attaches to one instance, and Multi-Attach needs a cluster file system.
+of failure. EBS attaches to one instance, and Multi-Attach needs a cluster file system. Splitting
+the document root across tiers — code on FSx, everything else on EFS — saves nothing once the FSx
+floor is paid, and core files are read on every request and rewritten by every core update.
 
 ### Database
 
