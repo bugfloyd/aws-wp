@@ -1,6 +1,6 @@
 terraform {
   backend "s3" {
-    key          = "hosted-zones-state/terraform.tfstate"
+    key          = "aws-wp/hostedzones/terraform.tfstate"
     encrypt      = true
     use_lockfile = true
   }
