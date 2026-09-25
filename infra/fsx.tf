@@ -77,6 +77,13 @@ resource "aws_fsx_openzfs_file_system" "websites" {
   # well would pay twice for the same recovery points.
   automatic_backup_retention_days = 0
 
+  # Sunday 04:30 UTC by default, straight after the database's window, so the
+  # stack has one quiet maintenance period a week rather than two at times AWS
+  # picked. Single-AZ patching makes the file system unavailable for a few
+  # minutes, and with a hard NFS mount every PHP request that touches a file
+  # waits until it is back; CloudFront keeps serving cached pages meanwhile.
+  weekly_maintenance_start_time = var.fsx_weekly_maintenance_start_time
+
   # Deleting the file system still takes a final backup, which is worth having
   # after a stack is replaced. It is a native FSx backup rather than a recovery
   # point, so it sits outside the vault and never expires - and without these

@@ -366,7 +366,10 @@ snapshot restore, so it is ignored afterwards; the real protection on a running 
 upgrading before the deadline.
 
 **Minor versions upgrade automatically** in the maintenance window, Sundays 03:30–04:30 UTC, which
-is also when a brief database restart is expected. Automated backups run daily in 02:00–03:00 UTC.
+is also when a brief database restart is expected. The file system's weekly maintenance follows at
+04:30 (`fsx_weekly_maintenance_start_time`). A Single-AZ file system is unavailable for a few minutes
+while it is patched, and PHP requests that touch files wait for it, so the stack has one quiet
+maintenance period a week instead of two at times AWS picked. Automated backups run daily in 02:00–03:00 UTC.
 
 **`db_snapshot_identifier` creates the database from a snapshot** rather than empty — how a
 replacement stack takes over data, with per-site users and passwords intact. It is ignored once the

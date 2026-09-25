@@ -133,6 +133,17 @@ variable "fsx_throughput_capacity" {
   }
 }
 
+variable "fsx_weekly_maintenance_start_time" {
+  description = "When FSx may patch the file system each week, as d:HH:MM in UTC with 1 = Monday. A Single-AZ file system is unavailable for a few minutes during it, and every PHP request touching files waits (the mount is hard), so it is pinned to right after the database's own window rather than left where AWS happened to put it"
+  type        = string
+  default     = "7:04:30"
+
+  validation {
+    condition     = can(regex("^[1-7]:([01][0-9]|2[0-3]):[0-5][0-9]$", var.fsx_weekly_maintenance_start_time))
+    error_message = "Use d:HH:MM, with d from 1 (Monday) to 7 (Sunday), in UTC."
+  }
+}
+
 variable "php_settings" {
   description = "php.ini values applied at boot. The image ships PHP's own defaults, which are wrong for WordPress in visible ways - a 2 MB upload cap rejects an ordinary phone photo, and 30 seconds is too short for a large plugin update on network storage"
   type        = map(string)
