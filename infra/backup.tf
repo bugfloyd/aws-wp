@@ -85,7 +85,14 @@ resource "aws_iam_role_policy_attachment" "restore" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores"
 }
 
-resource "aws_backup_selection" "efs" {
+# Named efs until the file system moved to FSx; the moved block keeps the
+# existing selection rather than replacing it.
+moved {
+  from = aws_backup_selection.efs
+  to   = aws_backup_selection.fsx
+}
+
+resource "aws_backup_selection" "fsx" {
   name         = "${var.stack_name}-fsx"
   plan_id      = aws_backup_plan.websites.id
   iam_role_arn = aws_iam_role.backup.arn

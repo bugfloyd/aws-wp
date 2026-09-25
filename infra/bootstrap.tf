@@ -56,8 +56,9 @@ locals {
     config_bucket   = aws_s3_bucket.config.id
     php_settings    = var.php_settings
 
-    # Only the mirrored sites, so a domain with the edge disabled does not get a
-    # sync target it has no bucket policy for.
+    # Every site's bucket. The sync writes through the instance role, which
+    # reaches all of them whether or not the edge is enabled; only CloudFront's
+    # read access waits for the distributions.
     media_buckets       = local.media_bucket_names
     media_sync_interval = var.media_sync_interval
     # Stamped in so a change to any rendered config changes the user data, and

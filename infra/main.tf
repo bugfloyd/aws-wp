@@ -14,13 +14,6 @@ provider "aws" {
   region = "us-east-1" # ACM for CloudFront must be in us-east-1
 }
 
-# The edge tier is separable from the server.
-#
-# A CloudFront alternate domain name can belong to only one distribution at a
-# time, account-wide, so a replacement stack cannot claim a live domain while
-# the existing one holds it. Building with enable_edge = false stands up the
-# server, its storage and its database - and lets a migration restore and verify
-# real data - without touching DNS or certificates. Flip it to true at cutover.
 # A shared secret CloudFront adds to every request it sends to the instance.
 #
 # The security group only proves a request came from CloudFront, and every
@@ -36,6 +29,13 @@ resource "random_password" "origin_secret" {
   special = false
 }
 
+# The edge tier is separable from the server.
+#
+# A CloudFront alternate domain name can belong to only one distribution at a
+# time, account-wide, so a replacement stack cannot claim a live domain while
+# the existing one holds it. Building with enable_edge = false stands up the
+# server, its storage and its database - and lets a migration restore and verify
+# real data - without touching DNS or certificates. Flip it to true at cutover.
 module "websites_cert_cloudfront_dns" {
   source = "./cert_cloudfront_dns"
 

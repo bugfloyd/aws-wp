@@ -29,7 +29,7 @@ resource "aws_security_group" "fsx" {
     security_groups = [aws_security_group.ec2_web.id]
   }
 
-  # rpcbind and the mount, status and lock daemons. NFS 4.1 negotiates
+  # rpcbind and the mount, status and lock daemons. NFS 4.x negotiates
   # everything over 2049 and does not need these, but the mount command can
   # still probe them and the failure mode is a mount that hangs rather than one
   # that reports why.

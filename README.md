@@ -112,7 +112,7 @@ How long the rest is kept is decided at the origin, by a guard that runs before 
 | Logged-in pages, password-protected posts, 404s (WordPress's own `no-cache`) | never | as WordPress says |
 | Temporary redirects, errors | never | `no-store` |
 | Images, CSS, JavaScript and fonts from the instance | 7 days (OpenLiteSpeed's `max-age=604800`) | the same |
-| Year-folder media from S3 | 1 day (AWS managed CachingOptimized) | the same |
+| Year-folder media from S3 | 1 day (AWS managed CachingOptimized) | nothing: S3 sends no `Cache-Control`, so browsers fall back to their own heuristics |
 
 **An edit reaches visitors within about 7 minutes.** After the 7 minutes the next visitor gets the
 old copy instantly while CloudFront fetches the new one, so on a quiet page it can take one more
@@ -377,7 +377,9 @@ database exists.
 
 **The defaults are for stacks built to be torn down.** `db_deletion_protection` defaults to
 `false`, `db_skip_final_snapshot` to `true` and `db_apply_immediately` to `true`. Anything serving
-real traffic should set the first two the other way.
+real traffic should set the first two the other way. `db_apply_immediately = true` suits production
+too, as long as database changes are applied at a quiet hour; set it to `false` to let RDS hold them
+for the Sunday maintenance window instead.
 
 ### Instance
 
@@ -438,8 +440,18 @@ certificates SNI-only, so it refuses the handshake. What broke without it:
 `intl` and `imagick` are what Site Health recommends: Imagick is WordPress's preferred image editor,
 and resizes large photos with less PHP memory than GD. The SSM agent comes
 from its `.deb` rather than the snap Ubuntu ships, because the image removes `snapd`: snap
-auto-refresh would change packages on its own schedule, the opposite of how these instances are
-meant to change.
+auto-refresh replaces whole packages on its own schedule, with no way to limit it to security fixes.
+
+**Ubuntu's unattended upgrades stay on.** Every morning they install Ubuntu's security updates in
+place, and may restart OpenLiteSpeed gracefully to load a patched library (seen on 2026-09-22). On an
+instance that can run for weeks between configuration changes, security fixes arriving in place are
+worth more than an instance identical to its image. What they do not cover, and only a new image
+does:
+- the kernel, which is installed but runs only after the instance is replaced from a newer image
+- OpenLiteSpeed and LSPHP, whose LiteSpeed repository is not one of unattended-upgrades' sources
+
+Rebuild the image monthly, or when LiteSpeed announces a security release, and apply with the new
+`ols_image_id`.
 
 **The instance can read its whole config bucket**, not only the `ols/` prefix. A migration stages
 site archives and database dumps there for the instance to pull, and a narrower grant fails
@@ -915,8 +927,8 @@ wp-site <domain> core update
 ### Changing configuration
 
 Any change to the bootstrap, the rendered OpenLiteSpeed config, `php_settings`, `php_children`,
-`php_extra_children`, `domains`, `media_sync_interval` or the AMI replaces the instance. The old one is terminated first,
-so for a few minutes cached pages and S3 media keep serving while everything else returns 5xx; the
+`php_extra_children`, `domains`, `media_sync_interval` or the AMI replaces the instance. The old one
+is terminated first, so for a few minutes cached pages and S3 media keep serving while everything else returns 5xx; the
 instance-status alarm fires and clears once (see [Alerts](#alerts)). Changing `instance_type`
 stops and starts the same instance instead. To replace it deliberately:
 
@@ -1406,12 +1418,14 @@ version lapses — see [Database](#database)) and **the canary schedule** (see [
 | **PHP errors are not logged by default** | See [Logs](#logs) for capturing them per site. |
 | **The slow query log is off** | Exported to CloudWatch, never written. |
 | **Nothing replaces a broken instance** | EC2's default automatic recovery moves the instance to healthy hardware when its host fails, but a broken OS or web server is only reported, by the canary. No Auto Scaling group acts on it until the Scalable stage. |
-| **Content changes wait on the edge cache** | An edit or an approved comment reaches anonymous visitors within about 7 minutes, and on a quiet page one visit later. Nothing purges CloudFront on publish; a WordPress plugin that invalidates the changed pages from the instance's role (C3 CloudFront Cache Controller, for one) would make it immediate, at the cost of a plugin inside WordPress and CloudFront permissions on the instance. |
+| **Content changes wait on the edge cache** | An edit or an approved comment reaches anonymous visitors within about 7 minutes, and on a quiet page one visit later. Nothing purges CloudFront on publish. A WordPress plugin that invalidates the changed pages (C3 CloudFront Cache Controller, for one) would make it immediate, at the cost of a plugin inside WordPress and AWS access of its own: PHP is deliberately kept from the instance role (see [Instance](#instance)). |
 | **Single Availability Zone** | The instance, the file system and the database each live in one zone. The Resilient stage fixes it. |
 | **A false alarm per instance replacement** | See [Alerts](#alerts). |
 | **Server logs do not survive replacement** | Per-site logs live on the file system; the bootstrap and server logs do not. |
 | **Large admin-panel updates are bounded** | By the 120-second origin timeout. WP-CLI is not. |
 | **Service-created logs never expire** | The canary's and RDS's CloudWatch log groups have no retention and outlive their canary or database; canary artifacts in S3 follow the log bucket's five-year lifecycle. |
+| **WordPress cannot send email** | The image has no mail transfer agent, and nothing relays to a mail service. `wp_mail()` fails on every site: password resets, comment notifications, contact forms, update notices. A lost-password request still looks successful. Outbound mail through SES is planned as a separate change. Until then, a site that must send mail needs an SMTP plugin configured with a real mail service. |
+| **Site Health reports the loopback test as critical** | Expected. The test posts to the site's own `/wp-cron.php`, which the edge answers with 403 (see [Edge](#edge)). Cron runs from the instance and does not use that URL. The REST API and page cache checks should pass; if they fail with an SSL handshake error, the image lacks the curl extension. |
 | **Provider versions float** | `.terraform.lock.hcl` is not committed, so providers resolve within their constraints at `init`. |
 
 ---
@@ -1487,9 +1501,12 @@ once there are several instances.
 | `infra/backup.tf` | Backup vault, plan, selection, role |
 | `infra/alerts.tf` | SNS topic, instance and database alarms |
 | `infra/canary.tf`, `canary_iam.tf` | Synthetics canary, its alarm and role |
+| `infra/edge_cache.tf` | CloudFront Functions, the shared cache and origin request policies, the origin guard |
 | `infra/cert_cloudfront_dns/` | Per-domain certificate, distribution, policies, DNS records |
 | `infra/templates/bootstrap.sh.tftpl` | Instance bootstrap |
 | `infra/templates/httpd_config.conf.tftpl`, `vhconf.conf.tftpl`, `admin_config.conf.tftpl` | OpenLiteSpeed server, virtual host and WebAdmin configs |
+| `infra/templates/viewer_request.js.tftpl`, `viewer_response.js` | CloudFront Functions: personal requests, blocked paths, what browsers are told |
+| `infra/templates/edge_cache.php.tftpl` | Origin caching guard, loaded before every PHP request |
 | `infra/templates/canary.js` | Canary script |
 
 Outputs: `webserver_public_ip`, `webserver_public_dns`, `db_endpoint`, `db_master_secret_arn`,

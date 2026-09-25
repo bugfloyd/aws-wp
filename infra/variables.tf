@@ -103,7 +103,7 @@ variable "db_backup_retention_days" {
 }
 
 variable "db_apply_immediately" {
-  description = "Apply RDS modifications at once rather than in the maintenance window. Should be false in production"
+  description = "Apply RDS modifications at once rather than holding them for the maintenance window. Fine in production if database changes are applied at a quiet hour; false defers them to Sunday's window"
   type        = bool
   default     = true
 }

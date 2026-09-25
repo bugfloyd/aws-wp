@@ -1,4 +1,4 @@
-# The Terraform state buckets.
+# The Terraform state bucket.
 #
 # Every other configuration in this repo keeps its state here, so this bucket
 # cannot live in the same configuration as the stacks themselves. It was created
@@ -58,10 +58,6 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "infra_state" {
     }
   }
 }
-
-
-
-
 
 output "infra_state_bucket" {
   description = "Bucket holding infra/ state"
