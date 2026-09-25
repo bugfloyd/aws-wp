@@ -950,11 +950,14 @@ still serving; it proves nothing about the new one until cutover.
 | WebAdmin | `/usr/local/lsws/admin/logs/error.log`, `access.log` | 10 MB files; access 90 days | no |
 | Scheduled jobs | `journalctl -u wp-cron.service`, `journalctl -u wp-media-sync.service` | systemd journal | no |
 | SSM agent | `/var/log/amazon/ssm/amazon-ssm-agent.log` | agent default | no |
-| CloudFront access | `s3://<cloudfront_logging_bucket_name>/<domain>/web/`, gzipped, delivered within about an hour | 5 years | — |
+| CloudFront access | `s3://<cloudfront_logging_bucket_name>/<domain>/web/`, gzipped, delivered within about an hour; no cookies | 5 years | — |
 | Canary run artifacts | `s3://<cloudfront_logging_bucket_name>/canary/eu-west-1/<canary>/YYYY/MM/DD/HH/` (request and step reports) | 5 years, the bucket's lifecycle | — |
 | Canary run history | CloudWatch Synthetics console, `aws synthetics get-canary-runs` | 2 days passed, 14 days failed | — |
 | Canary execution | CloudWatch Logs `/aws/lambda/cwsyn-<stack_name>-origin-<id>` | never expires | — |
 | Database errors | CloudWatch Logs `/aws/rds/instance/<stack_name>-mysql/error` | never expires | — |
+
+**CloudFront's logs leave cookies out** (`include_cookies = false`). With them in, every WordPress
+session cookie of anyone who logged in would sit in the log bucket for five years.
 
 The per-site access log format is `%v %h %l %u %t "%r" %>s %b` — site, client address, time,
 request line, status, bytes; no referrer or user agent. **The client address is a CloudFront edge,

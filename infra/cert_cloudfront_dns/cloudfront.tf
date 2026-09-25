@@ -210,10 +210,15 @@ resource "aws_cloudfront_distribution" "cloudfront" {
     minimum_protocol_version = "TLSv1.2_2021"
   }
 
+  # No cookies in the logs. CloudFront logs every cookie a viewer sends,
+  # whatever the cache behavior forwards: that includes WordPress's
+  # logged-in and auth cookies, which would sit in the bucket for the five
+  # years its lifecycle keeps logs, usable by anyone who can read it until the
+  # session ends. Nothing here reads them.
   logging_config {
     bucket          = "${var.logging_bucket}.s3.amazonaws.com"
     prefix          = "${var.domain}/web/"
-    include_cookies = true
+    include_cookies = false
   }
 
   restrictions {
