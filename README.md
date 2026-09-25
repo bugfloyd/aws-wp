@@ -206,6 +206,13 @@ CloudFront overwrites any copy a viewer sends. The value lives in Terraform stat
 distribution's configuration, and in the rendered virtual host config in the config bucket; plans
 show it as sensitive.
 
+**PHP sees the visitor's address, not the edge's.** OpenLiteSpeed only sees the CloudFront edge that
+connected. So the origin guard (below) sets PHP's `REMOTE_ADDR` from `CloudFront-Viewer-Address`,
+the viewer's address as CloudFront saw it. It trusts the header only while `enforce_origin_secret` is
+on: every request that reaches PHP from outside has then come through one of this stack's
+distributions, which set the header themselves. Comment addresses, spam filters and login limiters
+see real visitors. OpenLiteSpeed's own access log still shows edges.
+
 **Caching is decided in four layers**, each covering what the one before cannot. The first and
 last are enough for most requests; the middle two exist because WordPress and its plugins do not
 reliably say what may be shared.
@@ -224,8 +231,8 @@ reliably say what may be shared.
    cached even for anonymous visitors, because its answers can differ per visitor in ways WordPress
    does not mark, and stale answers break the editors and forms that call it.
 3. **An origin guard** — `templates/edge_cache.php.tftpl`, loaded before every PHP request through
-   `auto_prepend_file` from outside every document root; not a WordPress plugin. It makes two
-   decisions WordPress leaves open. A response that sets a cookie is never cached: CloudFront stores
+   `auto_prepend_file` from outside every document root; not a WordPress plugin. Besides the
+   visitor's address (above), it makes two decisions WordPress leaves open. A response that sets a cookie is never cached: CloudFront stores
    `Set-Cookie` with the object and replays it on every hit, which was proven on this stack by a test
    page whose one random cookie went to every visitor after the first. And a public page gets an
    explicit TTL with `stale-while-revalidate` and `stale-if-error`, instead of CloudFront's default.
@@ -728,6 +735,12 @@ the command early without an error, and the sync then runs with no filter and no
   instance's first boot.
 - **`enforce_origin_secret`.** It looks like a debugging switch, and it is the only safe way to
   add or rotate the secret on a running stack — see [Changing configuration](#changing-configuration).
+  It also decides whether PHP trusts `CloudFront-Viewer-Address` for the visitor's address.
+- **`useIpInProxyHeader 2`, not 4.** 4 means "use the last address in `X-Forwarded-For`", and CloudFront
+  does append the viewer's address last, so it looks like the one-line fix for edge addresses in the
+  logs. But the security group admits every CloudFront distribution, and a Lambda@Edge function on
+  someone else's can rewrite `X-Forwarded-For`. One ending in `127.0.0.1` would pass as the instance's
+  own request, which the origin secret rule lets through.
 - **The long list of types in `expiresByType`.** OpenLiteSpeed labels files from its own
   `mime.properties`: `.js` is `text/javascript`, `.woff` is `application/font-woff`, `.eot` is
   `application/vnd.ms-fontobject`. Any type missing from the list gets no `Cache-Control`, so
@@ -981,7 +994,8 @@ aws cloudfront wait distribution-deployed --id <id>       # for each distributio
 terraform apply                                           # instance replaced, check on
 ```
 
-The same last two steps added the header to this stack when it was first introduced. A stack built
+While the check is off, PHP sees edge addresses rather than visitors'. The same last two steps added
+the header to this stack when it was first introduced. A stack built
 from scratch needs none of it: its distributions carry the header from the moment they exist.
 
 **Tuning the cache.** Every rule is a variable:
@@ -1092,7 +1106,7 @@ session cookie of anyone who logged in would sit in the log bucket for five year
 
 The per-site access log format is `%v %h %l %u %t "%r" %>s %b` — site, client address, time,
 request line, status, bytes; no referrer or user agent. **The client address is a CloudFront edge,
-not the visitor** (see [Known gaps](#known-gaps)). The server-level `access.log` stays empty
+not the visitor.** PHP gets the visitor's; OpenLiteSpeed's logs do not (see [Known gaps](#known-gaps)). The server-level `access.log` stays empty
 because every site logs separately. For referrers, user agents, viewer addresses, edge cache
 results and timings, use the CloudFront logs.
 
@@ -1442,7 +1456,7 @@ version lapses — see [Database](#database)) and **the canary schedule** (see [
 
 | Gap | Detail |
 | --- | ------ |
-| **Visitor addresses are lost** | OpenLiteSpeed's `useIpInProxyHeader 2` uses `X-Forwarded-For` only from trusted IPs, and none are configured. Logs and PHP see the CloudFront edge's address, which affects comment IPs, spam filtering and rate limiting. Trusting the header from every peer is not a safe fix alone: viewers can send their own. A robust fix reads the `CloudFront-Viewer-Address` header, which CloudFront sets and viewers cannot. |
+| **OpenLiteSpeed logs edge addresses** | The per-site access logs show the CloudFront edge that connected, not the visitor. PHP gets the visitor's address from the origin guard, which reads `CloudFront-Viewer-Address`, and CloudFront's own logs have it. OpenLiteSpeed's `useIpInProxyHeader` could fix the logs, but not safely here (see [What looks harmless and is not](#what-looks-harmless-and-is-not)). While `enforce_origin_secret` is off, during a rotation, PHP sees edge addresses too. |
 | **PHP errors are not logged by default** | See [Logs](#logs) for capturing them per site. |
 | **The slow query log is off** | Exported to CloudWatch, never written. |
 | **Nothing replaces a broken instance** | EC2's default automatic recovery moves the instance to healthy hardware when its host fails, but a broken OS or web server is only reported, by the canary. No Auto Scaling group acts on it until the Scalable stage. |
@@ -1479,7 +1493,9 @@ An earlier load balancer and Auto Scaling draft, since deleted, established thes
   do not carry the header and do not come from loopback, so the rule would fail every one of them,
   mark every target unhealthy, and have the group replace instances forever. CloudFront's custom
   header moves to the load balancer origin, and the load balancer's security group keeps the
-  CloudFront prefix list. `enforce_origin_secret` goes with the rule.
+  CloudFront prefix list. `enforce_origin_secret` goes with the rule, and with it the origin guard's
+  reason to trust `CloudFront-Viewer-Address`: base that on the listener rule instead, or PHP sees the
+  load balancer's address.
 - **Or drop the secret entirely with CloudFront VPC origins.** An internal load balancer in the
   private subnets, reached by CloudFront privately, has no public address to protect. It needs the
   NAT gateway this stage adds anyway, for the instances' outbound traffic. It removes the load

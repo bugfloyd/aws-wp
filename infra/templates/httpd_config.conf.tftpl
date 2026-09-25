@@ -18,10 +18,16 @@ showVersionNumber         0
 # 2 means "take the client address from X-Forwarded-For, but only when the
 # connection comes from a trusted IP". No trusted IPs are listed in
 # accessControl below, so in practice the header is never used: requests are
-# logged, and passed to PHP, with the address of the CloudFront edge that
-# connected. Trusting the header from every peer instead is not a safe fix on
-# its own - viewers can send their own X-Forwarded-For - so this is left as a
-# known gap rather than patched blindly.
+# logged with the address of the CloudFront edge that connected. PHP gets the
+# visitor's address from the origin guard instead, which reads
+# CloudFront-Viewer-Address (see edge_cache.php).
+#
+# Not 4, "use the last address in X-Forwarded-For", although CloudFront does
+# append the viewer's address last. Anyone can point a CloudFront distribution
+# of their own at this origin, and a Lambda@Edge function there can rewrite
+# X-Forwarded-For. Ending it with 127.0.0.1 would make the request look like
+# the instance's own, and the origin secret rule in every virtual host lets
+# loopback through.
 useIpInProxyHeader        2
 
 errorlog logs/error.log {

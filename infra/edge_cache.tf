@@ -30,6 +30,9 @@ locals {
     ttl = var.page_cache_ttl
     swr = var.page_stale_while_revalidate
     sie = var.page_stale_if_error
+    # Only then can every request that reaches PHP from outside be trusted to
+    # carry CloudFront's own CloudFront-Viewer-Address.
+    trust_viewer_address = var.enable_edge && var.enforce_origin_secret
   })
 }
 
