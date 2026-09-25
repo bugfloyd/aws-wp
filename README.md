@@ -749,6 +749,11 @@ the command early without an error, and the sync then runs with no filter and no
   logs. But the security group admits every CloudFront distribution, and a Lambda@Edge function on
   someone else's can rewrite `X-Forwarded-For`. One ending in `127.0.0.1` would pass as the instance's
   own request, which the origin secret rule lets through.
+- **`autoDetectCdn 0` and `autoWhiteListLocalIps 0`.** They read like conveniences switched off. Left at
+  their defaults, OpenLiteSpeed trusts `X-Forwarded-For` from Cloudflare's ranges, from QUIC.cloud's
+  (downloaded daily) and from the server's own addresses, and a trusted peer sending `127.0.0.1` passes
+  the origin secret rule the same way. The security group keeps those peers out, and these keep the rule
+  from depending on it. The end-to-end test found this: its requests come from the server's own address.
 - **The long list of types in `expiresByType`.** OpenLiteSpeed labels files from its own
   `mime.properties`: `.js` is `text/javascript`, `.woff` is `application/font-woff`, `.eot` is
   `application/vnd.ms-fontobject`. Any type missing from the list gets no `Cache-Control`, so
