@@ -492,6 +492,44 @@ keep running their old version for up to fifteen minutes.**
 **WP-CLI is installed**, with a `wp-site <domain> <args>` wrapper that runs it as the web user. It
 has no timeout, which the admin panel does.
 
+### LiteSpeed Cache
+
+**Installed on two of the sites, and deactivated in this stage** (2026-09-25, naz.li and
+belenhein.com). Its page cache needs OpenLiteSpeed's cache module, which stays off until the Cached
+stage (`enable_ols_cache = false`), and CloudFront is the page cache here. Every other feature was
+switched off on both sites too, so it changed nothing visitors saw. Meanwhile it:
+- ran on every uncached request
+- added `X-LiteSpeed-*` headers that read like caching that wasn't happening
+- scheduled two tasks every minute, which would each take a PHP worker once cron ran
+- added attack surface
+
+Deactivating keeps its settings in the database; the Cached stage turns it back on as it was.
+
+**A site can still use it for front-end optimisation** — CSS and JavaScript minification and
+combination, lazy loading, image optimisation — without the cache module, and nothing in this stage
+conflicts with that:
+- It writes generated files to `wp-content/litespeed/`, outside the year folders. They are served
+  from the file system through the default behavior, with versioned names and the week-long
+  lifetime OpenLiteSpeed gives CSS and JavaScript, and never mirrored to S3.
+- It sends no `Cache-Control` and no cookies on anonymous pages, so the origin guard still decides
+  what CloudFront keeps.
+- Its `.htaccess` block holds only cache-module directives, which do nothing while the module is off.
+
+What to know when turning it on:
+- **After purging its CSS/JS, invalidate CloudFront** (see [Debugging](#debugging)). Pages cached at
+  the edge keep pointing at the removed files until they refresh — up to about 11 hours on a quiet
+  page. The plugin purges its own cache, not CloudFront.
+- **Leave the crawler and the object cache off.** The crawler warms a server page cache this stage
+  does not run, and would only load the 15-worker pool. The object cache needs Memcached or Redis,
+  which arrive with ElastiCache in the Cached stage.
+- **Background work needs working cron and loopback HTTPS**: critical CSS, unique CSS and image
+  optimisation queues. Both are in place (see [Scheduled jobs](#scheduled-jobs) and
+  [Instance](#instance)).
+- **"Optimize original images" rewrites year-folder files in place.** The media sync uploads the new
+  version, but CloudFront and browsers keep the unoptimised copy for up to a day, which is harmless.
+- **Guest mode sets cookies on pages**, and the origin guard never caches a response that sets one,
+  so those pages always come from the origin.
+
 ### Naming
 
 Every resource whose name must be unique beyond the VPC is prefixed with `stack_name`, so a second
