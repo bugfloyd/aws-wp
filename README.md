@@ -532,9 +532,16 @@ site in the list also takes `*`, so a request matching nothing still reaches a s
 ### Scheduled jobs
 
 **WP-Cron**, every minute, starting three minutes after boot. Takes `/var/www/.wp-cron.lock`
-non-blocking, then requests `wp-cron.php` for each site over `127.0.0.1` with the site's `Host`.
-With more than one instance, exactly one runs each tick. Those requests appear in every site's
-access log once a minute, from `127.0.0.1`.
+non-blocking, then requests `wp-cron.php` for each site over `127.0.0.1` with the site's `Host` and
+`CloudFront-Forwarded-Proto: https`, so cron callbacks see the scheme visitors do. With more than
+one instance, exactly one runs each tick. Those requests appear in every site's access log once a
+minute, from `127.0.0.1`.
+
+The request carries no query string, and that is load-bearing (see
+[What looks harmless and is not](#what-looks-harmless-and-is-not)). It goes over HTTP rather than
+through WP-CLI because a PHP worker already has WordPress compiled in OPcache. WP-CLI has no OPcache
+here and measured 0.8–1.7 seconds and up to 107 MB per site per run, loading everything from the
+network file system each minute.
 
 **Media sync**, every `media_sync_interval` (default ten minutes), starting three minutes after
 boot. Takes `/var/www/.wp-media-sync.lock` non-blocking and exits unless `/var/www` is mounted.
@@ -581,6 +588,13 @@ the command early without an error, and the sync then runs with no filter and no
 - **`depends_on` from the log bucket's ACL to its ownership controls.** Buckets default to
   `BucketOwnerEnforced`, which rejects ACLs, and CloudFront's standard logging needs the
   `log-delivery-write` ACL.
+
+### What looks harmless and is not
+
+- **A `doing_wp_cron` value on the cron runner's request.** `wp-cron.php` reads it as the key of a lock
+  its caller already holds and returns without running anything unless it matches the `doing_cron`
+  transient. The response is still a 200. An earlier runner passed a timestamp, and no scheduled event
+  ran on any site for days. Without the parameter, `wp-cron.php` takes the lock itself.
 
 ---
 
@@ -1095,6 +1109,17 @@ aws cloudfront create-invalidation --distribution-id <id> --paths "/*"
 
 The first 1,000 invalidation paths each month are free, and `/*` counts as one. A year-folder media
 file edited in place (WordPress never does this) needs its path invalidated too.
+
+**Scheduled posts miss their time, or plugins' background jobs stall.** List what is overdue:
+
+```sh
+wp-site <domain> cron event list --due-now --fields=hook,next_run_relative
+journalctl -u wp-cron.service -n 5
+```
+
+A minute after a tick nothing should be listed. Events that stay overdue mean `wp-cron.php` is
+returning without running them. Check that the runner's request in
+`/usr/local/bin/wp-cron-runner.sh` has no query string.
 
 **Media is not reaching S3.** `journalctl -u wp-media-sync.service`; run
 `sudo /usr/local/bin/wp-media-sync.sh` by hand; check `/etc/wp-media-sync.conf`; confirm the mount.

@@ -318,6 +318,16 @@ echo "Released bootstrap lock"
 # and is taken non-blocking, so precisely one instance fires each tick however
 # many are in the group. No extra AWS resources, and it self-heals when an
 # instance is replaced.
+#
+# No doing_wp_cron in the query string. wp-cron.php reads a value there as the
+# key of a lock its caller already holds, and returns without running anything
+# unless it matches the doing_cron transient - which a value made up here never
+# does. Without it, wp-cron.php takes the lock itself and runs what is due. An
+# earlier version passed a timestamp, and no scheduled event ran for days while
+# every tick answered 200.
+#
+# CloudFront-Forwarded-Proto makes the request look like a visitor's, so cron
+# callbacks that build URLs from is_ssl() get https as they would at the edge.
 cat > /usr/local/bin/wp-cron-runner.sh <<'CRONRUNNER'
 #!/bin/bash
 set -uo pipefail
@@ -326,7 +336,8 @@ flock -n 201 || exit 0
 for DOMAIN in ${domain_list}; do
   curl -sS -m 55 -o /dev/null \
     -H "Host: $DOMAIN" \
-    "http://127.0.0.1:${http_port}/wp-cron.php?doing_wp_cron=$(date +%s)" || true
+    -H "CloudFront-Forwarded-Proto: https" \
+    "http://127.0.0.1:${http_port}/wp-cron.php" || true
 done
 CRONRUNNER
 chmod 0755 /usr/local/bin/wp-cron-runner.sh
