@@ -126,12 +126,26 @@ CGIRLimit  {
 # pools multiply the worker count - and therefore the database connections - by
 # the number of sites, against a db.t4g.micro that allows about 85 connections.
 # This keeps the budget flat as domains are added.
+#
+# No LSAPI_AVOID_FORK, although OpenLiteSpeed's stock config sets it. In that
+# mode LSAPI keeps up to PHP_LSAPI_CHILDREN + 1 idle workers and allows no spare
+# ones. After any burst that reaches the worker limit, workers left holding
+# connections OpenLiteSpeed has stopped using sit out LSAPI's 300-second idle
+# timer, no new worker can start, and requests wait in 60-second initTimeout
+# steps, then fail with 503. In production that was a five-minute PHP outage
+# for every site, several times a day. Without it, LSAPI keeps at most a third
+# of the workers idle and retires the rest within a second.
+#
+# LSAPI_EXTRA_CHILDREN is what LSAPI may run above PHP_LSAPI_CHILDREN while
+# those retire. It is set rather than left to LSAPI's default (a third of the
+# children) so the memory ceiling, php_children + php_extra_children, is
+# written down. maxConns still caps concurrent requests at php_children.
 extprocessor lsphp {
   type                    lsapi
   address                 uds://tmp/lshttpd/lsphp.sock
   maxConns                ${php_children}
   env                     PHP_LSAPI_CHILDREN=${php_children}
-  env                     LSAPI_AVOID_FORK=200M
+  env                     LSAPI_EXTRA_CHILDREN=${php_extra_children}
   initTimeout             60
   retryTimeout            0
   persistConn             1

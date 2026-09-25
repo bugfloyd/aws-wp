@@ -400,10 +400,24 @@ silently under `aws s3 cp --quiet`. Keep nothing in that bucket the web server s
 
 **One PHP pool for the whole server.** A pool per virtual host multiplies workers — and database
 connections, which a `db.t4g.micro` caps at about 85 — by the number of sites. `php_children`
-(default 15) is a ceiling, not an allocation: LSAPI forks on demand. Each worker adds about 26 MB of
-shared memory, although `ps` reports around 95 MB, so size from the baseline — roughly 450 MB for
-the OS, OpenLiteSpeed and the SSM agent — rather than from `ps`. Three sites run at about 420–440 MB
-of a `t3.micro`'s 909.
+(default 15) is a ceiling on concurrent PHP requests, not an allocation: LSAPI forks on demand. Each
+worker adds about 26 MB of shared memory, although `ps` reports around 95 MB, so size from the
+baseline — roughly 450 MB for the OS, OpenLiteSpeed and the SSM agent — rather than from `ps`. Three
+sites run at about 420–440 MB of a `t3.micro`'s 909.
+
+**Up to `php_extra_children` (default 5) spare workers.** After a burst, LSAPI retires surplus idle
+workers, and the spares let new ones start while that happens, so a burst clears in seconds. The
+memory ceiling is therefore `php_children + php_extra_children`: 20 workers, about 830 MB, still in
+RAM. `0` makes 15 a hard ceiling and recovery slower: a 40-request burst took up to 9 seconds instead
+of 3 in testing.
+
+**No `LSAPI_AVOID_FORK`**, although OpenLiteSpeed's stock configuration sets it. In that mode LSAPI
+keeps every worker idle and allows no spares. After any burst that reached 15 concurrent PHP requests,
+workers left holding connections OpenLiteSpeed had stopped using waited out LSAPI's 300-second idle
+timer. Meanwhile no new worker could start, and requests waited in 60-second steps, then failed with
+503. In production that was a five-minute PHP outage for all three sites, several times a day,
+triggered by scanners. The stock configuration with 10 workers jams the same way. The reproduction is
+in the PR #1 review notes.
 
 **A 1 GB swapfile**, with `vm.swappiness = 10`. PHP's `memory_limit` is 256 MB, so a few heavy
 requests at once can each grow far past the average; swap turns that from an out-of-memory kill
@@ -595,6 +609,9 @@ the command early without an error, and the sync then runs with no filter and no
   its caller already holds and returns without running anything unless it matches the `doing_cron`
   transient. The response is still a 200. An earlier runner passed a timestamp, and no scheduled event
   ran on any site for days. Without the parameter, `wp-cron.php` takes the lock itself.
+- **`env LSAPI_AVOID_FORK=200M` in the PHP external application.** It comes with OpenLiteSpeed's
+  stock configuration and reads like a memory optimisation. It is what jammed the PHP pool for five
+  minutes after every burst (see [Instance](#instance)).
 
 ---
 
@@ -788,7 +805,7 @@ wp-site <domain> core update
 ### Changing configuration
 
 Any change to the bootstrap, the rendered OpenLiteSpeed config, `php_settings`, `php_children`,
-`domains`, `media_sync_interval` or the AMI replaces the instance. The old one is terminated first,
+`php_extra_children`, `domains`, `media_sync_interval` or the AMI replaces the instance. The old one is terminated first,
 so for a few minutes cached pages and S3 media keep serving while everything else returns 5xx; the
 instance-status alarm fires and clears once (see [Alerts](#alerts)). Changing `instance_type`
 stops and starts the same instance instead. To replace it deliberately:
@@ -1021,6 +1038,10 @@ breaching missing-data rule turns into a permanent alarm. Set `enable_canary = f
   minutes after launch, and missing data counts as failing. Expect an ALARM and an OK email.
 - **A site added but not yet installed.** Its login page redirects to the installer, which fails
   the canary until the install is finished.
+
+Any other canary failure is real. The ones before the pool fix were `Connection timed out`: the first
+request hung inside a PHP pool jam while CloudFront kept serving cached pages. If they come back, count
+`Reached max children` lines in `/usr/local/lsws/logs/stderr.log` for that minute.
 
 ---
 

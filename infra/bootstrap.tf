@@ -36,10 +36,11 @@ locals {
   })
 
   httpd_config = templatefile("${path.module}/templates/httpd_config.conf.tftpl", {
-    domains      = local.domains_list
-    http_port    = var.webserver_http_port
-    enable_cache = var.enable_ols_cache ? 1 : 0
-    php_children = var.php_children
+    domains            = local.domains_list
+    http_port          = var.webserver_http_port
+    enable_cache       = var.enable_ols_cache ? 1 : 0
+    php_children       = var.php_children
+    php_extra_children = var.php_extra_children
   })
 
   admin_config = file("${path.module}/templates/admin_config.conf.tftpl")

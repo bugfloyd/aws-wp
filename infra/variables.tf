@@ -171,9 +171,20 @@ variable "php_settings" {
 }
 
 variable "php_children" {
-  description = "Ceiling on LSPHP worker processes for the whole server. Children are forked on demand, so idle sites cost nothing - but the ceiling must fit in instance memory, because a burst can reach it. Each worker adds about 26 MB of shared pages, though ps reports around 95 MB"
+  description = "Ceiling on concurrent PHP requests for the whole server, and on LSPHP's regular workers. Children are forked on demand, so idle sites cost nothing - but the ceiling, plus php_extra_children, must fit in instance memory, because a burst can reach it. Each worker adds about 26 MB of shared pages, though ps reports around 95 MB"
   type        = number
   default     = 15
+}
+
+variable "php_extra_children" {
+  description = "LSPHP workers allowed above php_children while workers left idle after a burst retire, so a burst clears in seconds. Set explicitly rather than left to LSAPI's default of php_children / 3, so the memory ceiling (php_children + this) is written down. 0 keeps php_children as a hard ceiling, at the cost of slower recovery from bursts"
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.php_extra_children >= 0
+    error_message = "php_extra_children cannot be negative."
+  }
 }
 
 variable "instance_type" {
