@@ -57,6 +57,11 @@ variable "pages_cache_policy_id" {
   type        = string
 }
 
+variable "media_response_function_arn" {
+  description = "CloudFront Function that gives year-folder media a browser lifetime when the origin sends none"
+  type        = string
+}
+
 variable "origin_request_policy_id" {
   description = "Shared origin request policy: every cookie, query string and viewer header reaches WordPress"
   type        = string

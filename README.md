@@ -112,7 +112,7 @@ How long the rest is kept is decided at the origin, by a guard that runs before 
 | Logged-in pages, password-protected posts, 404s (WordPress's own `no-cache`) | never | as WordPress says |
 | Temporary redirects, errors | never | `no-store` |
 | Images, CSS, JavaScript and fonts from the instance | 7 days (OpenLiteSpeed's `max-age=604800`, by Content-Type) | the same |
-| Year-folder media from S3 | 1 day (AWS managed CachingOptimized) | nothing: S3 sends no `Cache-Control`, so browsers fall back to their own heuristics |
+| Year-folder media from S3 | 1 day (AWS managed CachingOptimized) | 1 day: S3 sends no `Cache-Control`, so a viewer response function adds `max-age=86400` (`media_browser_ttl`) |
 
 **An edit reaches visitors within about 7 minutes.** After the 7 minutes the next visitor gets the
 old copy instantly while CloudFront fetches the new one, so on a quiet page it can take one more
@@ -153,7 +153,7 @@ takes the default behavior like any other request, served fresh from the file sy
 | WebAdmin password | Parameter Store `/<stack_name>/ols/admin-password` | `bootstrap.tf` |
 | Media buckets, origin access control | `<stack_name>-<domain, dots as hyphens>-media`, `<stack_name>-media<edge_policy_suffix>` | `media.tf` |
 | Certificates, distributions, DNS records | per domain | `cert_cloudfront_dns/` |
-| Edge caching rules | functions `<stack_name>-viewer-request` and `-viewer-response`, cache policy `<stack_name>-pages`, origin request policy `<stack_name>-origin` — one of each, shared by every site | `edge_cache.tf`, `templates/viewer_request.js.tftpl`, `templates/viewer_response.js` |
+| Edge caching rules | functions `<stack_name>-viewer-request`, `-viewer-response` and `-media-response`, cache policy `<stack_name>-pages`, origin request policy `<stack_name>-origin` — one of each, shared by every site | `edge_cache.tf`, `templates/viewer_request.js.tftpl`, `templates/viewer_response.js`, `templates/media_response.js.tftpl` |
 | Origin caching guard | `php/edge-cache.php` in the config bucket, loaded before every PHP request | `edge_cache.tf`, `templates/edge_cache.php.tftpl` |
 | Origin secret | `random_password.origin_secret`, sent as `X-Origin-Verify`, checked by a virtual host rewrite rule | `main.tf`, `cert_cloudfront_dns/cloudfront.tf`, `templates/vhconf.conf.tftpl` |
 | CloudFront logs and canary artifacts | S3 bucket `cloudfront_logging_bucket_name` | `logging_bucket.tf` |
@@ -242,6 +242,14 @@ reliably say what may be shared.
 A **viewer response function** then rewrites what browsers are told about pages to `no-cache`.
 Browsers honour `stale-while-revalidate` too, and a browser showing its own day-old copy — the
 anonymous version of a page after logging in — is the kind of mix-up the rest exists to prevent.
+
+**Year-folder media gets a browser lifetime from a second function.** S3 objects carry no
+`Cache-Control`, so on the media behavior a viewer response function adds
+`public, max-age=86400` when a response has none. A file the instance serves before the sync has
+copied it keeps OpenLiteSpeed's week. CloudFront never runs viewer response functions on a status of
+400 or above, so an error, such as both origins failing during an instance replacement, is never
+marked cacheable. A response headers policy would be simpler, and tested on a throwaway distribution
+it added the header to CloudFront's own 504 too.
 
 **Tracking parameters are excluded from the cache key but still forwarded.** The cache policy
 includes every query string except the ten in `cache_ignored_query_strings`; the origin request
@@ -1005,12 +1013,13 @@ from scratch needs none of it: its distributions carry the header from the momen
 | `page_cache_ttl` | 420 | seconds a public page stays fresh at the edge |
 | `page_stale_while_revalidate` | 39600 | how long after that the old copy answers while CloudFront refreshes; with `page_cache_ttl`, at most 12 hours |
 | `page_stale_if_error` | 86400 | how long the old copy answers while the origin is failing |
+| `media_browser_ttl` | 86400 | how long browsers keep year-folder media from S3 |
 | `cache_bypass_cookie_prefixes` | WordPress, WooCommerce, EDD | cookies that make a request personal — add a plugin's own session cookie here |
 | `cache_ignored_query_strings` | ten tracking parameters | query strings left out of the cache key (at most 10) |
 | `edge_blocked_files` | `wp-cron.php`, `xmlrpc.php` | file names answered with 403 at the edge |
 
-The three page timings live in the origin guard, so changing them replaces the instance; the other
-three only update the CloudFront function or policy.
+The three page timings live in the origin guard, so changing them replaces the instance; the others
+only update a CloudFront function or policy.
 
 **Rotating the WebAdmin password:** the bootstrap reads it at boot, so replace both together:
 `terraform apply -replace=random_password.ols_admin -replace=aws_instance.webserver`.
@@ -1424,7 +1433,7 @@ the account's other resources. About **$60 a month before tax**, for three low-t
 | AMI snapshot, 8 GB | $0.05 per GB-month | $0.40 |
 | S3 storage and requests, DNS queries, FSx backup storage | usage | ~$0.90 |
 | CloudFront | 1 TB and 10M requests free | $0 |
-| CloudFront Functions, two per page request | 2M invocations free, then $0.10 per million | $0 |
+| CloudFront Functions, two per page request, one per media file | 2M invocations free, then $0.10 per million | $0 |
 | **Total, before tax** | | **~$60** |
 
 **Free tiers do a lot of work here**, and they are account-wide, so a busier account pays list:
@@ -1550,7 +1559,7 @@ once there are several instances.
 | `infra/cert_cloudfront_dns/` | Per-domain certificate, distribution, policies, DNS records |
 | `infra/templates/bootstrap.sh.tftpl` | Instance bootstrap |
 | `infra/templates/httpd_config.conf.tftpl`, `vhconf.conf.tftpl`, `admin_config.conf.tftpl` | OpenLiteSpeed server, virtual host and WebAdmin configs |
-| `infra/templates/viewer_request.js.tftpl`, `viewer_response.js` | CloudFront Functions: personal requests, blocked paths, what browsers are told |
+| `infra/templates/viewer_request.js.tftpl`, `viewer_response.js`, `media_response.js.tftpl` | CloudFront Functions: personal requests, blocked paths, what browsers are told |
 | `infra/templates/edge_cache.php.tftpl` | Origin caching guard, loaded before every PHP request |
 | `infra/templates/canary.js` | Canary script |
 

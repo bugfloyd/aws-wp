@@ -57,6 +57,7 @@ module "websites_cert_cloudfront_dns" {
 
   pages_cache_policy_id        = aws_cloudfront_cache_policy.pages.id
   origin_request_policy_id     = aws_cloudfront_origin_request_policy.origin.id
+  media_response_function_arn  = aws_cloudfront_function.media_response.arn
   viewer_request_function_arn  = aws_cloudfront_function.viewer_request.arn
   viewer_response_function_arn = aws_cloudfront_function.viewer_response.arn
 

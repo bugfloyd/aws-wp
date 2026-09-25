@@ -52,6 +52,18 @@ resource "aws_cloudfront_function" "viewer_response" {
   code    = file("${path.module}/templates/viewer_response.js")
 }
 
+# What browsers are told about year-folder media: a lifetime when the origin
+# gave none, on successful responses only (see the template).
+resource "aws_cloudfront_function" "media_response" {
+  name    = "${var.stack_name}-media-response${var.edge_policy_suffix}"
+  runtime = "cloudfront-js-2.0"
+  comment = "Browser lifetime for year-folder media when the origin sends none"
+  publish = true
+  code = templatefile("${path.module}/templates/media_response.js.tftpl", {
+    ttl = var.media_browser_ttl
+  })
+}
+
 # Pages and everything else on the default behavior.
 #
 # The minimum TTL of 0 is what makes CloudFront honour no-cache, no-store and

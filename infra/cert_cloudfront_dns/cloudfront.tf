@@ -143,6 +143,13 @@ resource "aws_cloudfront_distribution" "cloudfront" {
     # strings in the cache key - and nothing a plugin drops into uploads becomes
     # reachable from a bucket.
     cache_policy_id = "658327ea-f89d-4fab-a63d-7e88639e58f6"
+
+    # S3 sends no Cache-Control; this tells browsers how long to keep a file
+    # when a successful response has none (see edge_cache.tf).
+    function_association {
+      event_type   = "viewer-response"
+      function_arn = var.media_response_function_arn
+    }
   }
 
   # Never cached, whatever the response headers or cookies say. WordPress already

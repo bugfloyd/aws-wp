@@ -304,6 +304,17 @@ variable "page_stale_if_error" {
   default     = 86400
 }
 
+variable "media_browser_ttl" {
+  description = "Seconds browsers keep year-folder media served from S3, which sends no Cache-Control of its own. A day matches what CloudFront keeps, so a file a plugin rewrites in place still reaches every visitor within a day"
+  type        = number
+  default     = 86400
+
+  validation {
+    condition     = var.media_browser_ttl >= 0
+    error_message = "media_browser_ttl cannot be negative."
+  }
+}
+
 variable "cache_bypass_cookie_prefixes" {
   description = "Cookie name prefixes that mark a request as personal: it is never served from the cache and its response is never shared. WordPress core, WooCommerce and Easy Digital Downloads by default; extend it for plugins with their own session cookies"
   type        = list(string)
