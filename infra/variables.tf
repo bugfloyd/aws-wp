@@ -255,9 +255,14 @@ variable "page_cache_ttl" {
 }
 
 variable "page_stale_while_revalidate" {
-  description = "Seconds after page_cache_ttl during which CloudFront answers with the old copy while it refreshes in the background. The oldest page a visitor can get is page_cache_ttl plus this"
+  description = "Seconds after page_cache_ttl during which CloudFront answers with the old copy while it refreshes in the background. The oldest page a visitor can get is page_cache_ttl plus this. Keep it under 12 hours: WordPress nonces embedded in a page are only guaranteed valid for 12 (at most 24), so an older copy can carry expired ones and break the AJAX features of the first visitor after a quiet spell"
   type        = number
-  default     = 86400
+  default     = 39600
+
+  validation {
+    condition     = var.page_stale_while_revalidate >= 0 && var.page_stale_while_revalidate + var.page_cache_ttl <= 43200
+    error_message = "page_cache_ttl + page_stale_while_revalidate must stay within 43200 seconds (12 hours), the shortest life of a WordPress nonce."
+  }
 }
 
 variable "page_stale_if_error" {

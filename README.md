@@ -107,7 +107,7 @@ How long the rest is kept is decided at the origin, by a guard that runs before 
 
 | Response | CloudFront keeps it | The browser is told |
 | -------- | ------------------- | ------------------- |
-| Public page, feed, sitemap, `robots.txt`, permanent redirect | 7 minutes, then up to a day more while refreshing, and while the origin is failing | `no-cache` |
+| Public page, feed, sitemap, `robots.txt`, permanent redirect | 7 minutes, then up to 11 hours more while refreshing, and up to a day while the origin is failing | `no-cache` |
 | Anything that sets a cookie | never | `no-store` |
 | Logged-in pages, password-protected posts, 404s (WordPress's own `no-cache`) | never | as WordPress says |
 | Temporary redirects, errors | never | `no-store` |
@@ -120,6 +120,12 @@ visit; logged-in users see changes at once. The same old copy keeps answering wh
 failing, which is what keeps cached pages up during an instance replacement. **Browsers never keep
 pages themselves** — they are told `no-cache` — so a browser cannot show its own anonymous copy
 after its user logs in.
+
+**No cached page is older than 12 hours while the origin is healthy**: 7 minutes fresh plus 11 hours
+of `stale-while-revalidate`. WordPress embeds nonces in pages — AJAX actions, forms, "load more"
+buttons — and a nonce is only guaranteed valid for 12 hours, so an older copy could hand the first
+visitor after a quiet spell a page whose buttons fail. While the origin is failing, `stale-if-error`
+still serves a copy up to a day old; broken buttons beat no page.
 
 **Tracking parameters** — `utm_source`, `utm_medium`, `utm_campaign`, `utm_term`, `utm_content`,
 `gclid`, `fbclid`, `msclkid`, `_gl`, `mc_cid` — are left out of the cache key, so campaign links
@@ -889,7 +895,7 @@ from scratch needs none of it: its distributions carry the header from the momen
 | Variable | Default | Changes |
 | -------- | ------- | ------- |
 | `page_cache_ttl` | 420 | seconds a public page stays fresh at the edge |
-| `page_stale_while_revalidate` | 86400 | how long after that the old copy answers while CloudFront refreshes |
+| `page_stale_while_revalidate` | 39600 | how long after that the old copy answers while CloudFront refreshes; with `page_cache_ttl`, at most 12 hours |
 | `page_stale_if_error` | 86400 | how long the old copy answers while the origin is failing |
 | `cache_bypass_cookie_prefixes` | WordPress, WooCommerce, EDD | cookies that make a request personal — add a plugin's own session cookie here |
 | `cache_ignored_query_strings` | ten tracking parameters | query strings left out of the cache key (at most 10) |
