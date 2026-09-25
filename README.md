@@ -746,6 +746,12 @@ the command early without an error, and the sync then runs with no filter and no
 - **`env LSAPI_AVOID_FORK=200M` in the PHP external application.** It comes with OpenLiteSpeed's
   stock configuration and reads like a memory optimisation. It is what jammed the PHP pool for five
   minutes after every burst (see [Instance](#instance)).
+- **A shorter `LSAPI_MAX_IDLE`.** It looks like a safety net, capping how long an idle PHP worker
+  lingers. But OpenLiteSpeed starts LSPHP with `LSAPI_PGRP_MAX_IDLE=60`: the whole PHP process group
+  exits once it has had no workers for a minute, and OPcache goes with it. With workers also expiring
+  after a minute, a couple of quiet minutes on these low-traffic sites would cold-start PHP from the
+  network file system. The default of 300 seconds keeps OPcache warm, and without `LSAPI_AVOID_FORK`
+  surplus workers retire within a second anyway.
 
 ---
 
