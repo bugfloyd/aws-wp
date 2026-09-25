@@ -27,6 +27,43 @@ DOMAINS=(${domain_list})
 # the portmapper, so it is pure exposure.
 systemctl disable --now rpcbind rpcbind.socket >/dev/null 2>&1 || true
 
+# Keep PHP away from the instance role's credentials.
+#
+# Any process on the box can ask the metadata service for the role's temporary
+# keys, IMDSv2 or not, and the role reads the database master secret and writes
+# every media bucket. PHP never needs them, so an exploited plugin on one site
+# should not get them either. OpenLiteSpeed and PHP run as www-data (uid 33);
+# everything that does need AWS - this bootstrap, the media sync, the SSM agent -
+# runs as root and is unaffected.
+#
+# A unit rather than a one-off rule, because user data runs only on an
+# instance's first boot and the rule has to survive a reboot. It goes in front
+# of ufw's chains and before OpenLiteSpeed starts, and adds the rule only if it
+# is missing.
+cat > /etc/systemd/system/wp-imds-guard.service <<'IMDSGUARD'
+[Unit]
+Description=Keep the web server's user away from instance metadata
+After=ufw.service
+Before=lshttpd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'iptables -w -C OUTPUT -d 169.254.169.254 -m owner --uid-owner 33 -j REJECT 2>/dev/null || iptables -w -I OUTPUT -d 169.254.169.254 -m owner --uid-owner 33 -j REJECT'
+ExecStop=/bin/sh -c 'iptables -w -D OUTPUT -d 169.254.169.254 -m owner --uid-owner 33 -j REJECT || true'
+
+[Install]
+WantedBy=multi-user.target
+IMDSGUARD
+systemctl daemon-reload
+if systemctl enable --now wp-imds-guard.service; then
+  echo "metadata guard active: uid 33 cannot reach 169.254.169.254"
+else
+  # A missing guard is today's exposure, not an outage; say so rather than
+  # leave every site down over it.
+  echo "WARNING: wp-imds-guard failed; PHP can reach the instance role's credentials" >&2
+fi
+
 # ---------------------------------------------------------------------------
 # 2. Swap
 # ---------------------------------------------------------------------------

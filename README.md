@@ -392,6 +392,21 @@ Parameter Store. The image ships a password hash nobody knows the plaintext of; 
 replaces it. Changes made through the console are lost on the next replacement — it exists to
 inspect live state.
 
+**PHP cannot reach the instance's AWS credentials.** Any process on the instance can ask the EC2
+metadata service for the instance role's temporary keys. The role reads the database master secret,
+writes and deletes every media bucket, and reads the config bucket with the origin secret. WordPress
+never needs any of that, so an exploited plugin on one site should not get it either.
+`wp-imds-guard.service` adds one firewall rule: processes running as `www-data` — OpenLiteSpeed and
+PHP — are refused at 169.254.169.254. Everything that uses AWS runs as root and is unaffected: the
+bootstrap, the media sync and the SSM agent. Terraform also requires IMDSv2 with a hop limit of 1,
+rather than relying on the image.
+
+What it means for WordPress: a plugin that needs AWS, such as one that invalidates CloudFront on
+publish, cannot borrow the instance role; it needs narrowly scoped access of its own. What it does not
+do: isolate the sites from each other. All of them run as `www-data` in one PHP pool, so a compromised
+site can still read the others' `wp-config.php`. Separating them needs a Unix user and PHP pool per
+site.
+
 **Session Manager, with SSH as a fallback.** The SSM agent is baked into the image and needs no
 inbound rule. SSH on port 22 is open only to `admin_ips`, for when the agent itself is what is
 broken.
@@ -489,7 +504,8 @@ instead of a DynamoDB table), AWS provider 6.x, MySQL 8.4, Synthetics runtime
 Everything below runs from `infra/templates/bootstrap.sh.tftpl`, logged to
 `/var/log/wp-bootstrap.log`. It is idempotent.
 
-1. **Trim attack surface** — disable `rpcbind`, which `nfs-common` pulls in and NFS 4 does not use
+1. **Trim attack surface** — disable `rpcbind`, which `nfs-common` pulls in and NFS 4 does not use;
+   install and start `wp-imds-guard.service`, which keeps `www-data` off the metadata service
 2. **Swap** — create and enable `/swapfile` (1 GB), set `vm.swappiness = 10`
 3. **Mount the file system** at `/var/www` via `/etc/fstab`, retrying for up to five minutes; exit
    with `FATAL` if it never mounts
@@ -533,6 +549,7 @@ site answered; without that line, the `curl:` errors before `wp-bootstrap finish
 | `/usr/local/bin/wp-cron-runner.sh`, `wp-media-sync.sh` | the two scheduled jobs |
 | `/etc/wp-media-sync.conf` | `domain=bucket`, one per line |
 | `/etc/systemd/system/wp-cron.{service,timer}`, `wp-media-sync.{service,timer}` | their units |
+| `/etc/systemd/system/wp-imds-guard.service` | the `iptables` rule refusing `www-data` at 169.254.169.254 |
 
 Only `/var/www` survives a replacement. Everything else is rebuilt.
 
@@ -615,6 +632,9 @@ the command early without an error, and the sync then runs with no filter and no
   show their own day-old copy of a page — including an anonymous copy after logging in.
 - **The static-file exemption in the viewer request function.** Without it every logged-in page
   view would also refetch the theme's CSS and JavaScript from the origin.
+- **`wp-imds-guard.service`.** Nothing breaks without it. It is the only thing between an exploited
+  plugin and the instance role, and a unit rather than a one-off rule because user data runs only on an
+  instance's first boot.
 - **`enforce_origin_secret`.** It looks like a debugging switch, and it is the only safe way to
   add or rotate the secret on a running stack — see [Changing configuration](#changing-configuration).
 - **`depends_on` from the log bucket's ACL to its ownership controls.** Buckets default to

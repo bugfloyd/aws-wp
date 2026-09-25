@@ -25,10 +25,10 @@ resource "aws_cloudfront_distribution" "cloudfront" {
     # to CloudFront's prefix list, and the secret header below, because that
     # prefix list admits every CloudFront distribution, not only this one.
     custom_origin_config {
-      http_port                = var.origin_http_port
-      https_port               = 443
-      origin_protocol_policy   = "http-only"
-      origin_ssl_protocols     = ["TLSv1.2"]
+      http_port              = var.origin_http_port
+      https_port             = 443
+      origin_protocol_policy = "http-only"
+      origin_ssl_protocols   = ["TLSv1.2"]
 
       # Shorter than OpenLiteSpeed's keepAliveTimeout (75 s in
       # templates/httpd_config.conf.tftpl), so CloudFront always drops an idle

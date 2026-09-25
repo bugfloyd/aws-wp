@@ -33,6 +33,18 @@ resource "aws_instance" "webserver" {
     delete_on_termination = true
   }
 
+  # IMDSv2 only, answered on the instance itself and no further. The AMI
+  # already asks for IMDSv2; saying it here means a different image cannot
+  # quietly bring IMDSv1 back. Which local users may reach it at all is the
+  # bootstrap's wp-imds-guard: PHP may not.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+    http_protocol_ipv6          = "disabled"
+    instance_metadata_tags      = "disabled"
+  }
+
   # Compressed, because EC2 caps user data at 16 KB and the script passed it.
   #
   # cloud-init sniffs the gzip magic bytes and decompresses before running, so
