@@ -111,7 +111,7 @@ How long the rest is kept is decided at the origin, by a guard that runs before 
 | Anything that sets a cookie | never | `no-store` |
 | Logged-in pages, password-protected posts, 404s (WordPress's own `no-cache`) | never | as WordPress says |
 | Temporary redirects, errors | never | `no-store` |
-| Images, CSS, JavaScript and fonts from the instance | 7 days (OpenLiteSpeed's `max-age=604800`) | the same |
+| Images, CSS, JavaScript and fonts from the instance | 7 days (OpenLiteSpeed's `max-age=604800`, by Content-Type) | the same |
 | Year-folder media from S3 | 1 day (AWS managed CachingOptimized) | nothing: S3 sends no `Cache-Control`, so browsers fall back to their own heuristics |
 
 **An edit reaches visitors within about 7 minutes.** After the 7 minutes the next visitor gets the
@@ -723,6 +723,11 @@ the command early without an error, and the sync then runs with no filter and no
   instance's first boot.
 - **`enforce_origin_secret`.** It looks like a debugging switch, and it is the only safe way to
   add or rotate the secret on a running stack — see [Changing configuration](#changing-configuration).
+- **The long list of types in `expiresByType`.** OpenLiteSpeed labels files from its own
+  `mime.properties`: `.js` is `text/javascript`, `.woff` is `application/font-woff`, `.eot` is
+  `application/vnd.ms-fontobject`. Any type missing from the list gets no `Cache-Control`, so
+  CloudFront refetches the file every seven minutes and browsers guess. Until `text/javascript` was
+  added, that was every JavaScript file on every site.
 - **`depends_on` from the log bucket's ACL to its ownership controls.** Buckets default to
   `BucketOwnerEnforced`, which rejects ACLs, and CloudFront's standard logging needs the
   `log-delivery-write` ACL.
@@ -1265,7 +1270,7 @@ file edited in place (WordPress never does this) needs its path invalidated too.
 **Scheduled posts miss their time, or plugins' background jobs stall.** List what is overdue:
 
 ```sh
-wp-site <domain> cron event list --due-now --fields=hook,next_run_relative
+wp-site <domain> cron event list --next_run_relative=now --fields=hook,next_run_gmt
 journalctl -u wp-cron.service -n 5
 ```
 

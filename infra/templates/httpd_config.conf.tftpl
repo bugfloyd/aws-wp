@@ -40,9 +40,16 @@ accesslog logs/access.log {
 
 indexFiles                index.php, index.html
 
+# A week for static assets, matched on the Content-Type OpenLiteSpeed sends,
+# which comes from conf/mime.properties rather than any standard: .js and .mjs
+# go out as text/javascript, .woff as application/font-woff, .otf as
+# application/x-font-woff and .eot as application/vnd.ms-fontobject. A type
+# missing here gets no Cache-Control at all, so CloudFront refetches it every
+# page_cache_ttl and browsers guess - which is what happened to every
+# JavaScript file until text/javascript was added.
 expires  {
   enableExpires           1
-  expiresByType           image/*=A604800,text/css=A604800,application/x-javascript=A604800,application/javascript=A604800,font/*=A604800,application/x-font-ttf=A604800
+  expiresByType           image/*=A604800,text/css=A604800,text/javascript=A604800,application/javascript=A604800,application/x-javascript=A604800,font/*=A604800,application/x-font-ttf=A604800,application/font-woff=A604800,application/x-font-woff=A604800,application/vnd.ms-fontobject=A604800
 }
 
 tuning  {
