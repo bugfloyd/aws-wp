@@ -435,7 +435,8 @@ for every request to their own site (`https_local_ssl_verify`), and CloudFront s
 certificates SNI-only, so it refuses the handshake. What broke without it:
 - Site Health's REST API and page-cache checks
 - the background runners of Action Scheduler (Rank Math, WP Mail SMTP) and Elementor
-- the check a plugin auto-update makes before keeping itself
+- plugin and theme auto-updates: they request the site to check it still runs, treat a failed request
+  as a fatal error, and roll themselves back
 
 `intl` and `imagick` are what Site Health recommends: Imagick is WordPress's preferred image editor,
 and resizes large photos with less PHP memory than GD. The SSM agent comes
@@ -541,6 +542,11 @@ What to know when turning it on:
   version, but CloudFront and browsers keep the unoptimised copy for up to a day, which is harmless.
 - **Guest mode sets cookies on pages**, and the origin guard never caches a response that sets one,
   so those pages always come from the origin.
+- **Its "Page cached by LiteSpeed Cache" footer comment is wrong here.** The plugin sees OpenLiteSpeed
+  and assumes the cache module is on, but nothing is cached at the origin (no `x-litespeed-cache`
+  header). CloudFront is the only page cache.
+- **Block themes inline most of their CSS**, so minification alone may change little; combining CSS
+  is what produces files under `wp-content/litespeed/`.
 
 ### Naming
 
