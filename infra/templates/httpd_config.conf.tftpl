@@ -155,8 +155,13 @@ extprocessor lsphp {
   backlog                 100
   instances               1
   priority                0
-  memSoftLimit            512M
-  memHardLimit            768M
+  # Address-space limits (RLIMIT_AS) on each worker, not memory use. A worker
+  # maps about 258 MB before it runs anything - mostly the 160 MB OPcache
+  # segment - so 512M left requests about 254 MB: less than PHP's own
+  # memory_limit, and nothing for image processing outside it. memory_limit in
+  # php_settings is the per-request cap; these only stop a runaway process.
+  memSoftLimit            2047M
+  memHardLimit            2047M
 }
 
 scripthandler  {

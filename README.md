@@ -423,6 +423,13 @@ in the PR #1 review notes.
 requests at once can each grow far past the average; swap turns that from an out-of-memory kill
 into a slow request.
 
+**`memory_limit` is the per-request cap, not OpenLiteSpeed.** The external application's
+`memSoftLimit`/`memHardLimit` set the address-space limit of each PHP worker, and a worker maps about
+258 MB before it runs any code, mostly OPcache's shared segment. The earlier 512 MB left a request
+about 254 MB: less than `memory_limit`, so raising `php_settings` had no effect, and a large photo
+could fail to resize with "Out of memory". They are 2047 MB now, as in OpenLiteSpeed's stock
+configuration, and only stop a runaway process.
+
 **PHP settings are a drop-in**, written to the PHP scan directory as `zz-wordpress.ini`, which
 sorts last and cannot be overridden by the image's `opcache.ini`. Defaults (`php_settings`):
 `memory_limit 256M`, `max_execution_time 300`, `max_input_time 300`, `upload_max_filesize 64M`,
