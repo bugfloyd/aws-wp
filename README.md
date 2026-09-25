@@ -243,6 +243,12 @@ WordPress mobile apps and desktop editors that publish over XML-RPC, Jetpack (wh
 XML-RPC), and pingbacks and trackbacks from other sites. To use any of them, remove `xmlrpc.php`
 from the list.
 
+**So does any path segment starting with a dot**, except `/.well-known/`: `/.env`, `/.git/config`,
+`/backup/.aws/credentials`. WordPress never serves such a path, and they are most of what scanners
+probe for. Each one used to render a full WordPress 404 on the origin: about 8,000 in five days across
+the three sites, arriving in bursts that tied up the PHP pool. `/.well-known/` stays open for the
+things that live there, such as `security.txt` and app-association files.
+
 **CloudFront reaches the instance as `origin.<domain>`**, a per-site A record for the Elastic IP,
 and OpenLiteSpeed lists that name for its site. The media behavior cannot forward the viewer's
 `Host` — S3 reads `Host` to decide which bucket a request is for — so when it falls back to the

@@ -46,6 +46,12 @@ function handler(event) {
 
 // A blocked file anywhere in the path, in any case, including with trailing
 // path info ("/xmlrpc.php/x" still runs xmlrpc.php).
+//
+// Also any path segment starting with a dot, other than /.well-known/.
+// WordPress never serves one, and they are most of what scanners ask for -
+// /.env, /.git/config, /.aws/credentials - each of which would otherwise
+// render a full WordPress 404 on the origin. CloudFront has already resolved
+// "." and ".." segments before this runs.
 function isBlocked(uri) {
     var path = uri;
     try {
@@ -55,7 +61,11 @@ function isBlocked(uri) {
     }
     var segments = path.toLowerCase().split('/');
     for (var i = 0; i < segments.length; i++) {
-        if (BLOCKED_FILES.indexOf(segments[i]) !== -1) {
+        var segment = segments[i];
+        if (BLOCKED_FILES.indexOf(segment) !== -1) {
+            return true;
+        }
+        if (segment.charAt(0) === '.' && segment !== '.well-known') {
             return true;
         }
     }
