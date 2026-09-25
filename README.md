@@ -422,9 +422,21 @@ broken.
 
 **The image is deliberately bare.** Built by
 [aws-ols-mariadb-ami](https://github.com/bugfloyd/aws-ols-mariadb-ami) with the `web` profile: plain
-Ubuntu 24.04, OpenLiteSpeed with LSPHP 8.3, `nfs-common`, the AWS CLI v2, and the MySQL 8.0 client
-(`mysql-client-core-8.0` — the MariaDB client cannot authenticate with MySQL 8's
-`caching_sha2_password`). No virtual hosts, no WordPress, no database server. The SSM agent comes
+Ubuntu 24.04, OpenLiteSpeed with LSPHP 8.3 and the `curl`, `intl` and `imagick` extensions,
+`nfs-common`, the AWS CLI v2, and the MySQL 8.0 client (`mysql-client-core-8.0` — the MariaDB client
+cannot authenticate with MySQL 8's `caching_sha2_password`). No virtual hosts, no WordPress, no
+database server.
+
+**The curl extension is load-bearing.** Without it, WordPress's HTTP library uses a socket transport
+that turns SNI off whenever SSL verification is off. WordPress and its plugins turn verification off
+for every request to their own site (`https_local_ssl_verify`), and CloudFront serves these domains'
+certificates SNI-only, so it refuses the handshake. What broke without it:
+- Site Health's REST API and page-cache checks
+- the background runners of Action Scheduler (Rank Math, WP Mail SMTP) and Elementor
+- the check a plugin auto-update makes before keeping itself
+
+`intl` and `imagick` are what Site Health recommends: Imagick is WordPress's preferred image editor,
+and resizes large photos with less PHP memory than GD. The SSM agent comes
 from its `.deb` rather than the snap Ubuntu ships, because the image removes `snapd`: snap
 auto-refresh would change packages on its own schedule, the opposite of how these instances are
 meant to change.
@@ -691,7 +703,9 @@ Cost Explorer is queried in `us-east-1`.
 - Domains delegated to Route 53
 - An AMI built from [aws-ols-mariadb-ami](https://github.com/bugfloyd/aws-ols-mariadb-ami) with
   `-var profile=web`, **in the same region as the stack** — images are regional, and one built
-  elsewhere simply cannot be launched here
+  elsewhere simply cannot be launched here. It must include `lsphp83-curl`, which the web profile
+  installs; an older image boots with a `WARNING` in the bootstrap log, and WordPress cannot reach
+  its own sites over HTTPS (see [Instance](#instance))
 
 ### Deploying
 

@@ -208,6 +208,16 @@ if [ -n "$PHP_SCAN_DIR" ] && [ -d "$PHP_SCAN_DIR" ]; then
   echo "Edge caching rules installed"
 fi
 
+# The image must provide PHP's curl extension. Without it WordPress falls back
+# to a socket transport that drops SNI whenever SSL verification is off - which
+# is every request WordPress and its plugins make to their own site - and
+# CloudFront, serving SNI-only certificates, refuses the handshake. Site
+# Health's REST checks and every plugin's background jobs then fail. Not fatal
+# here: the sites still serve, but say so where it will be looked for.
+if ! /usr/bin/php -m 2>/dev/null | grep -qx curl; then
+  echo "WARNING: lsphp has no curl extension; WordPress cannot make HTTPS requests to its own sites. Rebuild the image with lsphp83-curl." >&2
+fi
+
 # WP-CLI.
 #
 # The admin panel drives updates through CloudFront, which caps how long it will
