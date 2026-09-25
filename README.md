@@ -253,6 +253,11 @@ every site's fallback lands on the catch-all site. A single-site stack cannot sh
 timeout per origin" quota, which AWS raises on request. An admin action that rewrites thousands of
 files on network storage — a large plugin update — needs the room.
 
+**The origin keeps idle connections longer than CloudFront does**: 75 seconds in OpenLiteSpeed against
+CloudFront's 60-second origin keep-alive. The other way round, CloudFront could send a request down a
+connection OpenLiteSpeed was closing at its stock 5 seconds. A GET is retried, but a POST — a login, a
+comment — returned 502, about twice a day.
+
 **The edge can be switched off.** `enable_edge = false` builds everything except certificates,
 distributions and DNS. A CloudFront alternate domain name belongs to one distribution at a time,
 account-wide, so a replacement stack is built and verified this way and gets its edge at cutover.

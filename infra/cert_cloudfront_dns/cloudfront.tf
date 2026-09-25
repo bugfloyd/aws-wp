@@ -29,6 +29,11 @@ resource "aws_cloudfront_distribution" "cloudfront" {
       https_port               = 443
       origin_protocol_policy   = "http-only"
       origin_ssl_protocols     = ["TLSv1.2"]
+
+      # Shorter than OpenLiteSpeed's keepAliveTimeout (75 s in
+      # templates/httpd_config.conf.tftpl), so CloudFront always drops an idle
+      # connection before the origin does and never sends a request down one
+      # that is closing. Keep the two in that order.
       origin_keepalive_timeout = 60
 
       # Long enough to survive a WordPress admin action that rewrites files on

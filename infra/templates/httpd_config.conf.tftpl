@@ -50,7 +50,11 @@ tuning  {
   maxSSLConnections       2000
   connTimeout             300
   maxKeepAliveReq         1000
-  keepAliveTimeout        5
+  # Longer than CloudFront keeps an idle origin connection
+  # (origin_keepalive_timeout, 60 s). With OpenLiteSpeed closing first, at the
+  # stock 5 s, CloudFront could send a request on a connection this end was
+  # closing; a GET is retried, but a POST - a login, a comment - came back 502.
+  keepAliveTimeout        75
   sndBufSize              0
   rcvBufSize              0
   maxReqURLLen            32768
