@@ -94,7 +94,11 @@ resource "aws_cloudfront_distribution" "cloudfront" {
     viewer_protocol_policy = "redirect-to-https"
 
     allowed_methods = ["HEAD", "DELETE", "POST", "GET", "OPTIONS", "PUT", "PATCH"]
-    cached_methods  = ["GET", "HEAD", "OPTIONS"]
+
+    # Not OPTIONS. A CORS preflight's answer depends on the Origin and
+    # Access-Control-Request-* headers, which are not in the cache key, so one
+    # cached answer would be replayed to every other origin asking.
+    cached_methods = ["GET", "HEAD"]
 
     cache_policy_id          = var.disable_cache ? local.caching_disabled : var.pages_cache_policy_id
     origin_request_policy_id = var.origin_request_policy_id

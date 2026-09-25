@@ -44,6 +44,16 @@ variable "admin_public_key" {
 variable "domains" {
   description = "Map of domain names to their Route 53 hosted zone IDs"
   type        = map(string)
+
+  # Each domain names a media bucket, <stack_name>-<domain with dots as
+  # hyphens>-media, and S3 bucket names are lowercase and at most 63 characters.
+  validation {
+    condition = alltrue([
+      for d in keys(var.domains) :
+      d == lower(d) && length("${var.stack_name}-${replace(d, ".", "-")}-media") <= 63
+    ])
+    error_message = "Domains must be lowercase, and <stack_name>-<domain>-media must fit S3's 63-character bucket name limit."
+  }
 }
 
 variable "cloudfront_logging_bucket_name" {
@@ -229,6 +239,18 @@ variable "canary_schedule_expression" {
   validation {
     condition     = can(regex("^rate\\((\\d+) (minute|minutes|hour|hours)\\)$", var.canary_schedule_expression))
     error_message = "Must be rate(N minutes) or rate(N hours) - the alarm period is derived from it by parsing."
+  }
+
+  # The alarm's period is the schedule's interval, and CloudWatch accepts
+  # periods from a minute up to a day.
+  validation {
+    condition = try(
+      tonumber(regex("^rate\\((\\d+) ", var.canary_schedule_expression)[0]) *
+      (strcontains(var.canary_schedule_expression, "hour") ? 3600 : 60) <= 86400 &&
+      tonumber(regex("^rate\\((\\d+) ", var.canary_schedule_expression)[0]) >= 1,
+      false
+    )
+    error_message = "The canary must run between once a minute and once a day."
   }
 }
 
