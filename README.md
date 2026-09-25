@@ -1274,7 +1274,8 @@ wp-site <domain> cron event list --next_run_relative=now --fields=hook,next_run_
 journalctl -u wp-cron.service -n 5
 ```
 
-A minute after a tick nothing should be listed. Events that stay overdue mean `wp-cron.php` is
+A minute after a tick nothing should be listed. (`--due-now` belongs to `cron event run`; on `list`
+it is silently ignored, and every event is listed.) Events that stay overdue mean `wp-cron.php` is
 returning without running them. Check that the runner's request in
 `/usr/local/bin/wp-cron-runner.sh` has no query string.
 
