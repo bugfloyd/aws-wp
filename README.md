@@ -569,10 +569,19 @@ and four things this stack depends on:
   (or a load balancer's `X-Forwarded-Proto`) says `https`.
 - **`DISABLE_WP_CRON`** — a timer drives cron instead.
 - **`DISALLOW_FILE_EDIT`** — no theme and plugin code editor in the admin screens.
-- **`AUTOMATIC_UPDATER_DISABLED`** — no unattended background updates.
+- **`WP_AUTO_UPDATE_CORE = 'minor'`** — security and maintenance releases within the site's
+  WordPress branch install themselves, driven by the cron runner. The files live once on the shared
+  file system and cron runs on one instance, so each update happens once for every instance.
+  Major releases, plugins and themes wait for someone to choose them.
 
 Sites brought in from elsewhere keep whatever `wp-config.php` they arrived with, including their
-own table prefix.
+own table prefix. Stacks created before minor updates were enabled carry
+`AUTOMATIC_UPDATER_DISABLED` instead, which blocks every background update, security releases
+included. Replace it by hand and restart OpenLiteSpeed:
+
+```sh
+sudo sed -i "s/define( 'AUTOMATIC_UPDATER_DISABLED', true );/define( 'WP_AUTO_UPDATE_CORE', 'minor' );/" /var/www/*/html/wp-config.php
+```
 
 **Virtual host.** Each site answers to `<domain>`, `www.<domain>` and `origin.<domain>`; the first
 site in the list also takes `*`, so a request matching nothing still reaches a site. Document root
@@ -830,7 +839,9 @@ mysql -h <db_endpoint> -u wpadmin -p                   # on the instance
 
 ### Updating WordPress, plugins and themes
 
-Through the admin screens, as usual — within limits. Each update rewrites files on network
+Minor WordPress releases install themselves (see [A site](#a-site)); a notice email would say so,
+but outbound email is a [known gap](#known-gaps). Everything else goes through the admin screens,
+as usual — within limits. Each update rewrites files on network
 storage and must finish inside CloudFront's 120-second origin timeout. A 5,872-file plugin takes
 about 39 seconds. For anything larger, or when the admin screens are the problem, use WP-CLI on
 the instance:

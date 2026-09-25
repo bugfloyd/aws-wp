@@ -325,11 +325,15 @@ foreach ( array( 'HTTP_CLOUDFRONT_FORWARDED_PROTO', 'HTTP_X_FORWARDED_PROTO' ) a
    jobs on each. A systemd timer drives it instead, on one instance at a time. */
 define( 'DISABLE_WP_CRON', true );
 
-/* No theme and plugin code editor in the admin screens, and no unattended
-   background updates: updates happen when someone chooses to run them, from the
-   admin screens or with WP-CLI. */
+/* No theme and plugin code editor in the admin screens. */
 define( 'DISALLOW_FILE_EDIT', true );
-define( 'AUTOMATIC_UPDATER_DISABLED', true );
+
+/* Minor WordPress releases - security and maintenance fixes within the same
+   branch - install themselves, from the cron runner. The files live once on
+   shared storage and cron runs on one instance, so an update happens once for
+   every instance. Major releases, plugins and themes are still updated by
+   someone choosing to, from the admin screens or with WP-CLI. */
+define( 'WP_AUTO_UPDATE_CORE', 'minor' );
 
 define( 'WP_DEBUG', false );
 
