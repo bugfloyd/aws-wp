@@ -566,6 +566,11 @@ its distributions are deleted, so two generations of the same stack need differe
 **Suffix explicit bucket names with the account ID.** A generic name can answer 404 to
 `head-bucket` and still fail creation with `BucketAlreadyExists`.
 
+**Media bucket names are the exception, and validated instead.** `<stack_name>-<domain>-media` has
+no account ID, so a domain whose name another account already holds fails at apply with
+`BucketAlreadyExists`. Adding a suffix now would mean new buckets and a copy for every existing site. The
+`domains` variable does check what it can at plan time: lowercase, and 63 characters at most.
+
 ### Versions
 
 Terraform ≥ 1.10 (the release that added `use_lockfile`, the S3 backend's native locking, used
@@ -882,6 +887,11 @@ apply. The instance is replaced, its bootstrap installs WordPress for the new do
 domain gets a certificate, a distribution, DNS records and a media bucket. Visit
 `https://<domain>/wp-admin/install.php` to finish the install. Until then its login page redirects
 to the installer, which the canary counts as a failure.
+
+The domain must be lowercase, and `<stack_name>-<domain>-media` must fit in S3's 63 characters; the
+plan refuses anything else. The new site cannot send email either, like the others (see
+[Known gaps](#known-gaps)): the installer's welcome message and every password reset are lost until a
+mail service is configured.
 
 ### Reaching the instance
 
