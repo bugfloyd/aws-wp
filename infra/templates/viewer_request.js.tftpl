@@ -1,0 +1,89 @@
+// Viewer request: runs before CloudFront looks in its cache, and decides whether
+// this request may share a cached copy with everyone else.
+//
+// CloudFront cache policies cannot match cookie names by prefix, and WordPress
+// suffixes its cookies with a per-site hash, so the decision is made here and
+// expressed as one header the cache policy does include in the key.
+
+var BYPASS_COOKIE_PREFIXES = ${jsonencode(bypass_cookie_prefixes)};
+var BLOCKED_FILES = ${jsonencode(blocked_files)};
+
+// Served straight from disk by OpenLiteSpeed, never through PHP, so never
+// personalised: logged-in users and commenters share these cached copies.
+var STATIC_FILE = /\.(css|js|mjs|map|png|jpe?g|gif|webp|avif|svg|ico|bmp|tiff?|woff2?|ttf|otf|eot|mp4|m4v|webm|ogv|mp3|m4a|ogg|oga|wav|flac|pdf|zip|gz)$/i;
+
+function handler(event) {
+    var request = event.request;
+
+    if (isBlocked(request.uri)) {
+        return {
+            statusCode: 403,
+            statusDescription: 'Forbidden',
+            headers: {
+                'content-type': { value: 'text/plain; charset=utf-8' },
+                'cache-control': { value: 'no-store' }
+            },
+            body: 'Forbidden'
+        };
+    }
+
+    // Only this function sets the header; a copy sent by the viewer is dropped.
+    delete request.headers['x-wp-cache-bypass'];
+
+    if (STATIC_FILE.test(request.uri)) {
+        return request;
+    }
+
+    if (isPersonal(request)) {
+        // A value no other request will ever carry: the request is never served
+        // from the cache, and nothing its response produces is served to anyone
+        // else.
+        request.headers['x-wp-cache-bypass'] = { value: event.context.requestId };
+    }
+
+    return request;
+}
+
+// A blocked file anywhere in the path, in any case, including with trailing
+// path info ("/xmlrpc.php/x" still runs xmlrpc.php).
+//
+// Also any path segment starting with a dot, other than /.well-known/.
+// WordPress never serves one, and they are most of what scanners ask for -
+// /.env, /.git/config, /.aws/credentials - each of which would otherwise
+// render a full WordPress 404 on the origin. CloudFront has already resolved
+// "." and ".." segments before this runs.
+function isBlocked(uri) {
+    var path = uri;
+    try {
+        path = decodeURIComponent(uri);
+    } catch (e) {
+        // Malformed escapes: judge the raw path.
+    }
+    var segments = path.toLowerCase().split('/');
+    for (var i = 0; i < segments.length; i++) {
+        var segment = segments[i];
+        if (BLOCKED_FILES.indexOf(segment) !== -1) {
+            return true;
+        }
+        if (segment.charAt(0) === '.' && segment !== '.well-known') {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Logged in, a commenter who saved their details, an unlocked password-protected
+// post, a shop cart or session - or the REST API reached through a query string.
+function isPersonal(request) {
+    if (request.querystring.rest_route) {
+        return true;
+    }
+    for (var name in request.cookies) {
+        for (var i = 0; i < BYPASS_COOKIE_PREFIXES.length; i++) {
+            if (name.indexOf(BYPASS_COOKIE_PREFIXES[i]) === 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}

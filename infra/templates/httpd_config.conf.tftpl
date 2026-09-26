@@ -1,0 +1,249 @@
+# OpenLiteSpeed server configuration, rendered at boot from Terraform values.
+#
+# Instances are disposable, so this file is regenerated on every launch rather
+# than edited in place. Anything changed through the WebAdmin console is lost when
+# the instance is next replaced - that is intended, not a limitation to work around.
+
+serverName                
+user                      www-data
+group                     www-data
+priority                  0
+inMemBufSize              60M
+swappingDir               /tmp/lshttpd/swap
+autoFix503                1
+gracefulRestartTimeout    300
+mime                      conf/mime.properties
+showVersionNumber         0
+
+# 2 means "take the client address from X-Forwarded-For, but only when the
+# connection comes from a trusted IP". With the two lines after it no peer is
+# trusted, so the header is never used: requests are logged with the address
+# of the CloudFront edge that connected. PHP gets the visitor's address from
+# the origin guard instead, which reads CloudFront-Viewer-Address (see
+# edge_cache.php).
+#
+# Why nothing may be trusted: the origin secret rule in every virtual host
+# lets 127.0.0.1 through, and a trusted peer sending "X-Forwarded-For:
+# 127.0.0.1" would become 127.0.0.1. OpenLiteSpeed trusts more than the
+# accessControl list below by default - Cloudflare's ranges, QUIC.cloud's
+# (downloaded daily) and the server's own addresses. The security group keeps
+# all of those away from port 80 today; these two keep the rule from resting
+# on that alone.
+#
+# Not 4, "use the last address in X-Forwarded-For", although CloudFront does
+# append the viewer's address last. Anyone can point a CloudFront distribution
+# of their own at this origin, and a Lambda@Edge function there can rewrite
+# X-Forwarded-For. Ending it with 127.0.0.1 would pass the same rule.
+useIpInProxyHeader        2
+autoDetectCdn             0
+autoWhiteListLocalIps     0
+
+errorlog logs/error.log {
+  logLevel                ERROR
+  debugLevel              0
+  rollingSize             10M
+  keepDays                7
+  enableStderrLog         1
+}
+
+accesslog logs/access.log {
+  rollingSize             10M
+  keepDays                7
+  compressArchive         1
+}
+
+indexFiles                index.php, index.html
+
+# A week for static assets, matched on the Content-Type OpenLiteSpeed sends,
+# which comes from conf/mime.properties rather than any standard: .js and .mjs
+# go out as text/javascript, .woff as application/font-woff, .otf as
+# application/x-font-woff and .eot as application/vnd.ms-fontobject. A type
+# missing here gets no Cache-Control at all, so CloudFront refetches it every
+# page_cache_ttl and browsers guess - which is what happened to every
+# JavaScript file until text/javascript was added.
+expires  {
+  enableExpires           1
+  expiresByType           image/*=A604800,text/css=A604800,text/javascript=A604800,application/javascript=A604800,application/x-javascript=A604800,font/*=A604800,application/x-font-ttf=A604800,application/font-woff=A604800,application/x-font-woff=A604800,application/vnd.ms-fontobject=A604800
+}
+
+tuning  {
+  maxConnections          2000
+  maxSSLConnections       2000
+  connTimeout             300
+  maxKeepAliveReq         1000
+  # Longer than CloudFront keeps an idle origin connection
+  # (origin_keepalive_timeout, 60 s). With OpenLiteSpeed closing first, at the
+  # stock 5 s, CloudFront could send a request on a connection this end was
+  # closing; a GET is retried, but a POST - a login, a comment - came back 502.
+  keepAliveTimeout        75
+  sndBufSize              0
+  rcvBufSize              0
+  maxReqURLLen            32768
+  maxReqHeaderSize        65536
+  maxReqBodySize          512M
+  maxDynRespHeaderSize    32768
+  maxDynRespSize          512M
+  maxCachedFileSize       4096
+  totalInMemCacheSize     20M
+  maxMMapFileSize         256K
+  totalMMapCacheSize      40M
+  useSendfile             1
+  fileETag                28
+  enableGzipCompress      1
+  compressibleTypes       default
+  enableDynGzipCompress   1
+  gzipCompressLevel       6
+  gzipAutoUpdateStatic    1
+  gzipStaticCompressLevel 6
+  brStaticCompressLevel   6
+  gzipMaxFileSize         10M
+  gzipMinFileSize         300
+  quicEnable              0
+}
+
+fileAccessControl  {
+  followSymbolLink        1
+  checkSymbolLink         0
+  requiredPermissionMask  000
+  restrictedPermissionMask 000
+}
+
+perClientConnLimit  {
+  staticReqPerSec         0
+  dynReqPerSec            0
+  outBandwidth            0
+  inBandwidth             0
+  softLimit               1000
+  hardLimit               1000
+  gracePeriod             15
+  banPeriod               300
+}
+
+accessDenyDir  {
+  dir                     /
+  dir                     /etc/*
+  dir                     /dev/*
+  dir                     conf/*
+  dir                     admin/conf/*
+}
+
+accessControl  {
+  allow                   ALL
+}
+
+# Required. Without this block OpenLiteSpeed routes every external application
+# launch through its suEXEC helper, and this build ships no lscgid binary, so
+# PHP fails with "cgidSuEXEC failed" and every request returns 503.
+CGIRLimit  {
+  maxCGIInstances         20
+  minUID                  11
+  minGID                  10
+  priority                0
+  CPUSoftLimit            10
+  CPUHardLimit            50
+  memSoftLimit            2047M
+  memHardLimit            2047M
+  procSoftLimit           400
+  procHardLimit           450
+}
+
+# One PHP pool for the whole server rather than one per virtual host. Per-vhost
+# pools multiply the worker count - and therefore the database connections - by
+# the number of sites, against a db.t4g.micro that allows about 85 connections.
+# This keeps the budget flat as domains are added.
+#
+# No LSAPI_AVOID_FORK, although OpenLiteSpeed's stock config sets it. In that
+# mode LSAPI keeps up to PHP_LSAPI_CHILDREN + 1 idle workers and allows no spare
+# ones. After any burst that reaches the worker limit, workers left holding
+# connections OpenLiteSpeed has stopped using sit out LSAPI's 300-second idle
+# timer, no new worker can start, and requests wait in 60-second initTimeout
+# steps, then fail with 503. In production that was a five-minute PHP outage
+# for every site, several times a day. Without it, LSAPI keeps at most a third
+# of the workers idle and retires the rest within a second.
+#
+# LSAPI_EXTRA_CHILDREN is what LSAPI may run above PHP_LSAPI_CHILDREN while
+# those retire. It is set rather than left to LSAPI's default (a third of the
+# children) so the memory ceiling, php_children + php_extra_children, is
+# written down. maxConns still caps concurrent requests at php_children.
+extprocessor lsphp {
+  type                    lsapi
+  address                 uds://tmp/lshttpd/lsphp.sock
+  maxConns                ${php_children}
+  env                     PHP_LSAPI_CHILDREN=${php_children}
+  env                     LSAPI_EXTRA_CHILDREN=${php_extra_children}
+  initTimeout             60
+  retryTimeout            0
+  persistConn             1
+  respBuffer              0
+  autoStart               2
+  path                    lsphp83/bin/lsphp
+  backlog                 100
+  instances               1
+  priority                0
+  # Address-space limits (RLIMIT_AS) on each worker, not memory use. A worker
+  # maps about 258 MB before it runs anything - mostly the 160 MB OPcache
+  # segment - so 512M left requests about 254 MB: less than PHP's own
+  # memory_limit, and nothing for image processing outside it. memory_limit in
+  # php_settings is the per-request cap; these only stop a runaway process.
+  memSoftLimit            2047M
+  memHardLimit            2047M
+}
+
+scripthandler  {
+  add                     lsapi:lsphp php
+}
+
+# Server level cache module. Disabled here: the Cached stage turns this on and
+# pairs it with the LiteSpeed Cache plugin. Left in place so that stage is a
+# value change rather than a restructure.
+module cache {
+  internal                1
+  checkPrivateCache       1
+  checkPublicCache        1
+  maxCacheObjSize         10000000
+  maxStaleAge             0
+  qsCache                 1
+  reqCookieCache          1
+  respCookieCache         1
+  ignoreReqCacheCtrl      1
+  ignoreRespCacheCtrl     0
+  enableCache             ${enable_cache}
+  expireInSeconds         3600
+  enablePrivateCache      0
+  privateExpireInSeconds  3600
+  ls_enabled              ${enable_cache}
+}
+
+listener wordpress {
+  address                 *:${http_port}
+  secure                  0
+%{ for i, domain in domains ~}
+%{ if i == 0 ~}
+  # Every site also answers to origin.<domain>, the name CloudFront reaches the
+  # origin by. It matters on any path that does not forward the viewer's Host
+  # header - which the media path cannot, because S3 reads Host to decide which
+  # bucket a request is for. When CloudFront fails over from a media bucket to
+  # this instance, the request arrives carrying the origin's name, and without a
+  # per-site origin name every site's fallback would land on the catch-all below.
+  # The first domain also takes "*", so requests whose Host matches nothing
+  # still reach a virtual host. The load balancer's health check addresses the
+  # target by IP and cannot send a Host header, so without this catch-all every
+  # check gets a 404, every target is marked unhealthy, and the group replaces
+  # instances forever.
+  map                     ${domain} ${domain}, www.${domain}, origin.${domain}, *
+%{ else ~}
+  map                     ${domain} ${domain}, www.${domain}, origin.${domain}
+%{ endif ~}
+%{ endfor ~}
+}
+
+%{ for domain in domains ~}
+virtualhost ${domain} {
+  vhRoot                  /var/www/${domain}
+  configFile              $SERVER_ROOT/conf/vhosts/${domain}/vhconf.conf
+  allowSymbolLink         1
+  enableScript            1
+  restrained              1
+}
+
+%{ endfor ~}
