@@ -1421,7 +1421,7 @@ yet been exercised on this stack; try it on a spare restore before relying on it
 
 Measured, not estimated: the rates below are what AWS billed this account in eu-west-1, and the
 monthly figures come from a full metered day (2026-09-24) with this stack's usage isolated from
-the account's other resources. About **$60 a month before tax**, for three low-traffic sites.
+the account's other resources. About **$58 a month before tax**, for three low-traffic sites.
 
 | Item | Billed rate | Monthly |
 | ---- | ----------- | ------- |
@@ -1434,22 +1434,24 @@ the account's other resources. About **$60 a month before tax**, for three low-t
 | EBS gp3 root volume, 20 GB | $0.088 per GB-month | $1.76 |
 | Route 53, three hosted zones | $0.50 per zone | $1.50 |
 | Canary runs, hourly | $0.0014 per run | $1.02 |
-| Canary metrics, 19 of them | $0.30 per metric-month | $5.70, less 10 free: **$2.70** |
+| Canary metrics, 11 of them | $0.30 per metric-month | $3.30, less 10 free: **$0.30** |
 | CloudWatch alarms, six alarm metrics | $0.10 per alarm-month | $0.60, less 10 free: **$0** |
 | Secrets Manager, the RDS master secret | $0.40 per secret | $0.40 |
 | AMI snapshot, 8 GB | $0.05 per GB-month | $0.40 |
 | S3 storage and requests, DNS queries, FSx backup storage | usage | ~$0.90 |
 | CloudFront | 1 TB and 10M requests free | $0 |
 | CloudFront Functions, two per page request, one per media file | 2M invocations free, then $0.10 per million | $0 |
-| **Total, before tax** | | **~$60** |
+| **Total, before tax** | | **~$58** |
 
 **Free tiers do a lot of work here**, and they are account-wide, so a busier account pays list:
-$64 rather than $60. The ten free custom metrics and ten free alarms are the difference.
+$61 rather than $58. The ten free custom metrics and ten free alarms are the difference.
 
-**The canary costs more in metrics than in runs.** It publishes seven metrics for the canary, a
-`Duration` and a `SuccessPercent` per site, and account-wide copies of six of them with no
-dimensions; a `Failed` metric joins on days a run fails. Each site added is $0.60 a month more in
-metrics — more than the site's share of the runs. Lowering `canary_schedule_expression` does not touch that half.
+**The canary publishes only the metrics something reads.** The runtime always sends `Duration` and
+`SuccessPercent`, for the canary and account-wide, plus the canary's storage use. The alarm reads the
+canary's `SuccessPercent`, and a `Duration` and a `SuccessPercent` per site show which site failed. The
+script switches off the response-code and failure counts, per canary and account-wide: for three
+requests a run they only restate the pass rate, and they were 8 of the 19 metrics it used to publish.
+Each site added is still $0.60 a month more in metrics — more than the site's share of the runs. Lowering `canary_schedule_expression` does not touch that half.
 
 **Charges that do not appear:**
 

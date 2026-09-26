@@ -21,8 +21,11 @@ locals {
 }
 
 data "archive_file" "canary" {
-  type        = "zip"
-  output_path = "${path.module}/.terraform/tmp/canary.zip"
+  type = "zip"
+  # The script's hash is part of the file name. The provider decides whether to
+  # upload new code by comparing zip_file, which is this path, not the zip's
+  # contents, so without it an edit to canary.js never reaches the canary.
+  output_path = "${path.module}/.terraform/tmp/canary-${filemd5("${path.module}/templates/canary.js")}.zip"
 
   source {
     # The runtime requires this exact layout: the handler is "<name>.handler"

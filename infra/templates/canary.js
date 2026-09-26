@@ -14,6 +14,25 @@ const synthetics = require('Synthetics');
 const log = require('SyntheticsLogger');
 
 const checkOrigin = async function () {
+  // Only the metrics something reads. The runtime always sends Duration and
+  // SuccessPercent, for this canary and account-wide; the alarm reads this
+  // canary's SuccessPercent, and the per-site step metrics show which site
+  // failed. The response-code and failure counts, per canary and again
+  // account-wide, only restate the pass rate for three requests a run, and
+  // every distinct metric past the account's free ten costs $0.30 a month.
+  synthetics.getConfiguration().setConfig({
+    failedCanaryMetric: false,
+    failedRequestsMetric: false,
+    _2xxMetric: false,
+    _4xxMetric: false,
+    _5xxMetric: false,
+    aggregatedFailedCanaryMetric: false,
+    aggregatedFailedRequestsMetric: false,
+    aggregated2xxMetric: false,
+    aggregated4xxMetric: false,
+    aggregated5xxMetric: false,
+  });
+
   const domains = process.env.DOMAINS.split(',').filter(Boolean);
 
   for (const domain of domains) {
