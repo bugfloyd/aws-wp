@@ -61,12 +61,43 @@ resource "aws_db_parameter_group" "websites" {
     value = "1"
   }
 
+  # The slow query log, exported to CloudWatch Logs (see the log group below).
+  # Both are dynamic: turning them on or changing the threshold needs no
+  # reboot. A second is slow for any WordPress query on a database this size;
+  # the usual finds are unindexed meta lookups and oversized autoloaded options.
+  parameter {
+    name  = "slow_query_log"
+    value = "1"
+  }
+
+  parameter {
+    name  = "long_query_time"
+    value = "1"
+  }
+
   lifecycle {
     create_before_destroy = true
   }
 
+  # The log group has to exist before RDS first exports to it (see below).
+  depends_on = [aws_cloudwatch_log_group.db_slowquery]
+
   tags = {
     Name       = "WebsitesDbParameterGroup"
+    CostCenter = "Bugfloyd/Websites/Database"
+  }
+}
+
+# RDS creates the log group for an exported log the first time it writes to
+# it, with no retention: slow queries would be kept forever. Created here first,
+# so it has one. The name is RDS's own convention and must match the instance
+# identifier; the error log's group predates this and still never expires.
+resource "aws_cloudwatch_log_group" "db_slowquery" {
+  name              = "/aws/rds/instance/${var.stack_name}-mysql/slowquery"
+  retention_in_days = 90
+
+  tags = {
+    Name       = "WebsitesDbSlowQueryLog"
     CostCenter = "Bugfloyd/Websites/Database"
   }
 }

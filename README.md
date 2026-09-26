@@ -1114,6 +1114,7 @@ still serving; it proves nothing about the new one until cutover.
 | Canary run history | CloudWatch Synthetics console, `aws synthetics get-canary-runs` | 2 days passed, 14 days failed | — |
 | Canary execution | CloudWatch Logs `/aws/lambda/cwsyn-<stack_name>-origin-<id>` | never expires | — |
 | Database errors | CloudWatch Logs `/aws/rds/instance/<stack_name>-mysql/error` | never expires | — |
+| Slow queries, over 1 s | CloudWatch Logs `/aws/rds/instance/<stack_name>-mysql/slowquery` | 90 days | — |
 
 **CloudFront's logs leave cookies out** (`include_cookies = false`). With them in, every WordPress
 session cookie of anyone who logged in would sit in the log bucket for five years.
@@ -1138,9 +1139,10 @@ Give `WP_DEBUG_LOG` a path, not `true`: `true` writes `wp-content/debug.log`, in
 root and downloadable by anyone who guesses the URL. The site's `logs` directory is on the file
 system, outside the document root, and writable by the web user.
 
-**The slow query log is exported but off.** `slowquery` is enabled for CloudWatch export, but the
-parameter group does not set `slow_query_log = 1`, so nothing is written. Set it (and
-`long_query_time`) in `database.tf` to use it.
+**Queries slower than a second are logged.** The parameter group sets `slow_query_log` and
+`long_query_time = 1`, and RDS exports the log to CloudWatch within minutes. Both parameters are
+dynamic, so changing the threshold in `database.tf` needs no reboot. Terraform creates the log group
+itself, with 90 days' retention: RDS would otherwise create it on the first export, with none.
 
 Reading them:
 
@@ -1473,7 +1475,6 @@ version lapses — see [Database](#database)) and **the canary schedule** (see [
 | --- | ------ |
 | **OpenLiteSpeed logs edge addresses** | The per-site access logs show the CloudFront edge that connected, not the visitor. PHP gets the visitor's address from the origin guard, which reads `CloudFront-Viewer-Address`, and CloudFront's own logs have it. OpenLiteSpeed's `useIpInProxyHeader` could fix the logs, but not safely here (see [What looks harmless and is not](#what-looks-harmless-and-is-not)). While `enforce_origin_secret` is off, during a rotation, PHP sees edge addresses too. |
 | **PHP errors are not logged by default** | See [Logs](#logs) for capturing them per site. |
-| **The slow query log is off** | Exported to CloudWatch, never written. |
 | **Nothing replaces a broken instance** | EC2's default automatic recovery moves the instance to healthy hardware when its host fails, but a broken OS or web server is only reported, by the canary. No Auto Scaling group acts on it until the Scalable stage. |
 | **Content changes wait on the edge cache** | An edit or an approved comment reaches anonymous visitors within about 7 minutes, and on a quiet page one visit later. Nothing purges CloudFront on publish. A WordPress plugin that invalidates the changed pages (C3 CloudFront Cache Controller, for one) would make it immediate, at the cost of a plugin inside WordPress and AWS access of its own: PHP is deliberately kept from the instance role (see [Instance](#instance)). |
 | **Single Availability Zone** | The instance, the file system and the database each live in one zone. The Resilient stage fixes it. |
