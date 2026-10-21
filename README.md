@@ -466,8 +466,9 @@ does:
 - the kernel, which is installed but runs only after the instance is replaced from a newer image
 - OpenLiteSpeed and LSPHP, whose LiteSpeed repository is not one of unattended-upgrades' sources
 
-Rebuild the image monthly, or when LiteSpeed announces a security release, and apply with the new
-`ols_image_id`.
+Rebuild the image monthly, or when PHP or LiteSpeed announces a security release, and apply with the
+new `ols_image_id`. The build installs whatever LiteSpeed's repository has at the time, so check that
+it carries the fixed release first: `apt-cache policy lsphp83` on the instance shows the candidate.
 
 **The instance can read its whole config bucket**, not only the `ols/` prefix. A migration stages
 site archives and database dumps there for the instance to pull, and a narrower grant fails
