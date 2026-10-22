@@ -539,7 +539,8 @@ sorts last and cannot be overridden by the image's `opcache.ini`. Defaults (`php
 trip each on NFS, so `opcache.revalidate_freq` is 900 seconds rather than 2, with 160 MB of cache
 for 20,000 files. WordPress calls `opcache_invalidate()` on files it writes during updates, so its
 own changes apply at once. **Files changed any other way — editing `wp-config.php` by hand — can
-keep running their old version for up to fifteen minutes.**
+keep running their old version for up to fifteen minutes**, unless PHP is stopped (see
+[Changing configuration](#changing-configuration)).
 
 **WP-CLI is installed**, with a `wp-site <domain> <args>` wrapper that runs it as the web user. It
 has no timeout, which the admin panel does.
@@ -739,10 +740,11 @@ and four things this stack depends on:
 Sites brought in from elsewhere keep whatever `wp-config.php` they arrived with, including their
 own table prefix. Stacks created before minor updates were enabled carry
 `AUTOMATIC_UPDATER_DISABLED` instead, which blocks every background update, security releases
-included. Replace it by hand and restart OpenLiteSpeed:
+included. Replace it by hand, then clear OPcache (see [Changing configuration](#changing-configuration)):
 
 ```sh
 sudo sed -i "s/define( 'AUTOMATIC_UPDATER_DISABLED', true );/define( 'WP_AUTO_UPDATE_CORE', 'minor' );/" /var/www/*/html/wp-config.php
+sudo pkill -x lsphp
 ```
 
 **Virtual host.** Each site answers to `<domain>`, `www.<domain>` and `origin.<domain>`; the first
@@ -837,6 +839,11 @@ the command early without an error, and the sync then runs with no filter and no
 - **`env LSAPI_AVOID_FORK=200M` in the PHP external application.** It comes with OpenLiteSpeed's
   stock configuration and reads like a memory optimisation. It is what jammed the PHP pool for five
   minutes after every burst (see [Instance](#instance)).
+- **Restarting OpenLiteSpeed to clear OPcache.** It reads like the obvious step after editing
+  `wp-config.php`, but LSPHP outlives the restart and the new server reattaches to it, so the old
+  version keeps running for up to fifteen minutes. Stop LSPHP itself (see
+  [Changing configuration](#changing-configuration)). During a site import, that window showed the
+  installer.
 - **A shorter `LSAPI_MAX_IDLE`.** It looks like a safety net, capping how long an idle PHP worker
   lingers. But OpenLiteSpeed starts LSPHP with `LSAPI_PGRP_MAX_IDLE=60`: the whole PHP process group
   exits once it has had no workers for a minute, and OPcache goes with it. With workers also expiring
@@ -1137,12 +1144,21 @@ stops and starts the same instance instead. To replace it deliberately:
 terraform apply -replace=aws_instance.webserver
 ```
 
-**After editing any file on the instance by hand — `wp-config.php` in particular — restart
-OpenLiteSpeed**, or OPcache may keep running the old version for up to fifteen minutes:
+**After editing a PHP file on the instance by hand — `wp-config.php` in particular — stop PHP**, or
+OPcache can keep running the old version for up to fifteen minutes. OpenLiteSpeed starts PHP again
+on the next request, with an empty OPcache. Requests in PHP at that moment fail, so pick a quiet
+minute:
 
 ```sh
-sudo /usr/local/lsws/bin/lswsctrl stop; sudo /usr/local/lsws/bin/lswsctrl start
+sudo pkill -x lsphp
 ```
+
+**Restarting OpenLiteSpeed does not clear OPcache.** LSPHP runs on its own: `lsws.service` has
+`KillMode=none`, so stopping the server leaves PHP running, and the server that starts next
+reattaches to it, OPcache and all. Tested on a file edited after OPcache had it:
+- `lswsctrl stop; lswsctrl start` and `systemctl stop lsws; systemctl start lsws` both went on
+  serving the old version
+- `pkill -x lsphp` served the new one at once
 
 **Rotating the origin secret** takes three applies. CloudFront needs several minutes to deploy a new
 value to every edge location, and an instance that already enforces a value the edges do not yet
@@ -1285,8 +1301,8 @@ reports warnings and errors, not notices or deprecations. A logrotate rule from 
 (`/etc/logrotate.d/wp-php-errors`) rotates it at 10 MB, keeping seven, as OpenLiteSpeed does its own.
 
 For notices and deprecations as well, set `WP_DEBUG` to `true` in the site's `wp-config.php` with
-the line below next to it, restart OpenLiteSpeed so OPcache picks up the change, reproduce, then
-revert and restart again. They land in the same `php-error.log`:
+the line below next to it, stop PHP so OPcache picks up the change (`sudo pkill -x lsphp`), reproduce,
+then revert and stop PHP again. They land in the same `php-error.log`:
 
 ```php
 define( 'WP_DEBUG_DISPLAY', false );
@@ -1414,8 +1430,8 @@ A 503 on every PHP request with `cgidSuEXEC failed` means `CGIRLimit` is missing
 pid file` means stale sockets in `/tmp/lshttpd`: stop, clear them, start.
 
 **"Error establishing a database connection".** Check `DB_HOST` in the site's `wp-config.php`, that
-the database is `available`, and — if the file was edited recently — restart OpenLiteSpeed, since
-OPcache may still hold the old version.
+the database is `available`, and — if the file was edited recently — stop PHP with
+`sudo pkill -x lsphp`, since OPcache may still hold the old version.
 
 **An instance never comes up after a replacement.**
 

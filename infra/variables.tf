@@ -185,7 +185,8 @@ variable "php_settings" {
     # opcache_invalidate() on every file it writes during a plugin, theme or
     # core update, so its own changes take effect immediately regardless.
     # Changes made outside WordPress - editing wp-config.php by hand - do not:
-    # restart OpenLiteSpeed after one.
+    # stop LSPHP after one (pkill -x lsphp). Restarting OpenLiteSpeed is not
+    # enough: LSPHP outlives it, and OPcache with it.
     "opcache.validate_timestamps" = "1"
     "opcache.revalidate_freq"     = "900"
   }
