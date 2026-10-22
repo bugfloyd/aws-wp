@@ -24,6 +24,10 @@ locals {
   viewer_request_code = templatefile("${path.module}/templates/viewer_request.js.tftpl", {
     bypass_cookie_prefixes = var.cache_bypass_cookie_prefixes
     blocked_files          = [for f in var.edge_blocked_files : lower(f)]
+    blocked_dirs           = [for d in var.edge_blocked_dirs : lower(d)]
+    blocked_extensions     = [for e in var.edge_blocked_extensions : lower(e)]
+    # The instance's requests through CloudFront leave from its Elastic IP.
+    instance_ips = [aws_eip.webserver.public_ip]
   })
 
   edge_cache_guard = templatefile("${path.module}/templates/edge_cache.php.tftpl", {
@@ -39,7 +43,7 @@ locals {
 resource "aws_cloudfront_function" "viewer_request" {
   name    = "${var.stack_name}-viewer-request${var.edge_policy_suffix}"
   runtime = "cloudfront-js-2.0"
-  comment = "Cache key for personal requests; blocks public cron and XML-RPC"
+  comment = "Cache key for personal requests; blocks public cron, XML-RPC, dot paths, plugin backups and logs"
   publish = true
   code    = local.viewer_request_code
 }

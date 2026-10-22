@@ -348,9 +348,31 @@ variable "cache_ignored_query_strings" {
 }
 
 variable "edge_blocked_files" {
-  description = "File names CloudFront answers with 403 wherever they appear in a path. wp-cron.php because cron runs on the instance itself; xmlrpc.php because nothing here uses it and it is a common brute-force target. Remove xmlrpc.php for the WordPress mobile app, Jetpack or pingbacks"
+  description = "File names CloudFront answers with 403 wherever they appear in a path. wp-cron.php because cron runs on the instance itself - whose own requests through CloudFront, such as Site Health's loopback test, still reach it; xmlrpc.php because nothing here uses it and it is a common brute-force target. Remove xmlrpc.php for the WordPress mobile app, Jetpack or pingbacks"
   type        = list(string)
   default     = ["wp-cron.php", "xmlrpc.php"]
+}
+
+variable "edge_blocked_dirs" {
+  description = "Directories under /wp-content/ whose contents CloudFront answers with 403. Plugins keep backups, logs and form uploads in them behind an .htaccess \"deny from all\", which OpenLiteSpeed ignores: it reads only rewrite rules from .htaccess. UpdraftPlus, Wordfence, Contact Form 7 and WooCommerce by default; none of them serves these files by URL. Remove woocommerce_uploads for WooCommerce's \"Redirect only\" download method, which links to the files themselves"
+  type        = list(string)
+  default     = ["updraft", "wflogs", "wpcf7_uploads", "woocommerce_uploads", "wc-logs"]
+
+  validation {
+    condition     = alltrue([for d in var.edge_blocked_dirs : can(regex("^[A-Za-z0-9._-]+$", d))])
+    error_message = "Each entry is a single directory name, without slashes."
+  }
+}
+
+variable "edge_blocked_extensions" {
+  description = "File extensions CloudFront answers with 403 anywhere, also as a rotated or compressed copy (error.log.1, dump.sql.gz): logs, database dumps, and the copies editors and backups leave behind. WordPress never serves one, and OpenLiteSpeed would hand out wp-config.php.bak as plain text"
+  type        = list(string)
+  default     = ["log", "sql", "bak", "old", "orig", "save", "swp"]
+
+  validation {
+    condition     = alltrue([for e in var.edge_blocked_extensions : can(regex("^[A-Za-z0-9]+$", e))])
+    error_message = "Each entry is an extension without its dot, letters and digits only."
+  }
 }
 
 variable "enforce_origin_secret" {

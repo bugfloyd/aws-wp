@@ -258,7 +258,9 @@ WordPress receives, too.
 
 **`/wp-cron.php` and `/xmlrpc.php` answer 403 at the edge**, wherever they appear in a path and in
 any case (`edge_blocked_files`). Cron does not need the public URL: it runs every minute from the
-instance itself over loopback, and a public `wp-cron.php` only lets anyone trigger it. XML-RPC is a
+instance itself over loopback, and a public `wp-cron.php` only lets anyone trigger it. The instance's
+own requests through CloudFront still reach it, recognised by its Elastic IP. Site Health's loopback
+test makes one, and so do plugins that start a cron run of their own. XML-RPC is a
 common brute-force and amplification target that nothing here uses. **What this breaks:** the
 WordPress mobile apps and desktop editors that publish over XML-RPC, Jetpack (which connects over
 XML-RPC), and pingbacks and trackbacks from other sites. To use any of them, remove `xmlrpc.php`
@@ -269,6 +271,27 @@ from the list.
 probe for. Each one used to render a full WordPress 404 on the origin: about 8,000 in five days across
 the three sites, arriving in bursts that tied up the PHP pool. `/.well-known/` stays open for the
 things that live there, such as `security.txt` and app-association files.
+
+**So do plugins' backups, logs and form uploads, and leftover copies of any file.** Plugins written
+for Apache keep these behind an `.htaccess` `deny from all`, and OpenLiteSpeed reads only rewrite
+rules from `.htaccess`, so on the instance those folders are public to anyone who knows a file's
+name. Scanners do ask: `/wp-content/updraft/` was probed on 2026-10-21. The
+edge refuses two things instead:
+
+- anything inside a directory in `edge_blocked_dirs` under `/wp-content/`: UpdraftPlus's
+  `updraft`, Wordfence's `wflogs`, Contact Form 7's `wpcf7_uploads`, and WooCommerce's
+  `woocommerce_uploads` and `wc-logs`. In their default settings, none of these plugins serves
+  those files by URL.
+- any file whose extension is in `edge_blocked_extensions`, wherever it is, and its rotated or
+  compressed copies: `.log`, `.sql`, `.bak`, `.old`, `.orig`, `.save` and `.swp`. That covers
+  `debug.log`, `error.log.1`, `dump.sql.gz` and a stray `wp-config.php.bak`, which OpenLiteSpeed
+  would otherwise hand out as plain text.
+
+A page whose slug matches a directory name, such as `/updraft/`, still works: only paths under
+`/wp-content/` count. **What this breaks:** WooCommerce's "Redirect only" download method, which
+links straight to the files in `woocommerce_uploads`. Use "Force downloads", its default, or remove
+the directory from the list. Year-folder media is not checked, because that path's behavior runs
+no viewer request function.
 
 **CloudFront reaches the instance as `origin.<domain>`**, a per-site A record for the Elastic IP,
 and OpenLiteSpeed lists that name for its site. The media behavior cannot forward the viewer's
@@ -1025,6 +1048,8 @@ from scratch needs none of it: its distributions carry the header from the momen
 | `cache_bypass_cookie_prefixes` | WordPress, WooCommerce, EDD | cookies that make a request personal — add a plugin's own session cookie here |
 | `cache_ignored_query_strings` | ten tracking parameters | query strings left out of the cache key (at most 10) |
 | `edge_blocked_files` | `wp-cron.php`, `xmlrpc.php` | file names answered with 403 at the edge |
+| `edge_blocked_dirs` | `updraft`, `wflogs`, `wpcf7_uploads`, `woocommerce_uploads`, `wc-logs` | directories under `/wp-content/` answered with 403 |
+| `edge_blocked_extensions` | `log`, `sql`, `bak`, `old`, `orig`, `save`, `swp` | file extensions answered with 403, with rotated and compressed copies |
 
 The three page timings live in the origin guard, so changing them replaces the instance; the others
 only update a CloudFront function or policy.
@@ -1341,6 +1366,18 @@ returning without running them. Check that the runner's request in
 `sudo /usr/local/bin/wp-media-sync.sh` by hand; check `/etc/wp-media-sync.conf`; confirm the mount.
 The script exits silently if another instance holds its lock.
 
+**A plugin's file or download answers 403 from CloudFront**, with `x-cache:
+FunctionGeneratedResponse`. Its path is in a directory in `edge_blocked_dirs`, or its extension is
+in `edge_blocked_extensions`. Remove it from the list if the plugin really serves that file by URL.
+
+**Site Health's loopback test fails.** It requests `/wp-cron.php` through CloudFront, which lets it
+through only from the instance's Elastic IP. From the instance, this should print 200, where
+anywhere else gets 403:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' https://<domain>/wp-cron.php
+```
+
 **Every uncached request returns 403 through CloudFront, but the instance works locally.** The
 origin secret does not match — typically a rotation applied in one step, or distributions still
 deploying a new value. OpenLiteSpeed's 403 is an HTML page titled `403 Forbidden`, where S3's is an
@@ -1496,7 +1533,6 @@ version lapses — see [Database](#database)) and **the canary schedule** (see [
 | **Large admin-panel updates are bounded** | By the 120-second origin timeout. WP-CLI is not. |
 | **Service-created logs never expire** | The canary's and RDS's CloudWatch log groups have no retention and outlive their canary or database; canary artifacts in S3 follow the log bucket's five-year lifecycle. |
 | **WordPress cannot send email** | The image has no mail transfer agent, and nothing relays to a mail service. `wp_mail()` fails on every site: password resets, comment notifications, contact forms, update notices. A lost-password request still looks successful. Outbound mail through SES is planned as a separate change. Until then, a site that must send mail needs an SMTP plugin configured with a real mail service. |
-| **Site Health reports the loopback test as critical** | Expected. The test posts to the site's own `/wp-cron.php`, which the edge answers with 403 (see [Edge](#edge)). Cron runs from the instance and does not use that URL. The REST API and page cache checks should pass; if they fail with an SSL handshake error, the image lacks the curl extension. |
 | **Provider versions float** | `.terraform.lock.hcl` is not committed, so providers resolve within their constraints at `init`. |
 
 ---
