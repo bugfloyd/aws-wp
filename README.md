@@ -615,7 +615,8 @@ Everything below runs from `infra/templates/bootstrap.sh.tftpl`, logged to
 7. **Per-site setup**, holding `/var/www/.bootstrap.lock` (waits up to ten minutes). For each
    domain: render its virtual host config and create its `html` and `logs` directories. If it has
    a `wp-config.php`, correct ownership only if wrong and move on. Otherwise put up a placeholder
-   page, create its database and user, install the latest WordPress, and write `wp-config.php`
+   page, create its database and user, install the latest WordPress, and write `wp-config.php`.
+   Then install the logrotate rule for every site's PHP error log
 8. **WP-Cron** — install the runner and its one-minute timer
 9. **Media sync** — install the script, its site-to-bucket map and its timer
 10. **Start serving** — full stop of OpenLiteSpeed, clear stale sockets, start, and poll
@@ -636,7 +637,7 @@ site answered; without that line, the `curl:` errors before `wp-bootstrap finish
 | ---- | ---- |
 | `/var/www/` | the FSx mount — every site, on shared storage |
 | `/var/www/<domain>/html/` | the WordPress install, document root |
-| `/var/www/<domain>/logs/` | that site's access and error logs |
+| `/var/www/<domain>/logs/` | that site's access, error and PHP error logs |
 | `/var/www/.bootstrap.lock`, `.wp-cron.lock`, `.wp-media-sync.lock` | locks electing a single runner |
 | `/usr/local/lsws/conf/httpd_config.conf` | server config, fetched at boot |
 | `/usr/local/lsws/conf/vhosts/<domain>/vhconf.conf` | per-site config, rendered at boot |
@@ -648,6 +649,7 @@ site answered; without that line, the `curl:` errors before `wp-bootstrap finish
 | `/etc/wp-media-sync.conf` | `domain=bucket`, one per line |
 | `/etc/systemd/system/wp-cron.{service,timer}`, `wp-media-sync.{service,timer}` | their units |
 | `/etc/systemd/system/wp-imds-guard.service` | the `iptables` rule refusing `www-data` at 169.254.169.254 |
+| `/etc/logrotate.d/wp-php-errors` | rotation for every site's `php-error.log` |
 
 Only `/var/www` survives a replacement. Everything else is rebuilt.
 
@@ -1106,6 +1108,7 @@ still serving; it proves nothing about the new one until cutover.
 | Bootstrap | `/var/log/wp-bootstrap.log`, `/var/log/cloud-init-output.log` | the instance's life | no |
 | Per-site access | `/var/www/<domain>/logs/access.log` | 10 MB files, 7 days, compressed | yes |
 | Per-site server errors | `/var/www/<domain>/logs/error.log` (level ERROR) | 10 MB files, 7 days | yes |
+| Per-site PHP errors | `/var/www/<domain>/logs/php-error.log`: warnings and fatal errors | 10 MB files, 7 kept, compressed (logrotate, checked daily) | yes |
 | OpenLiteSpeed server | `/usr/local/lsws/logs/error.log` (ERROR), `stderr.log`, `lsrestart.log` | 10 MB files, 7 days | no |
 | WebAdmin | `/usr/local/lsws/admin/logs/error.log`, `access.log` | 10 MB files; access 90 days | no |
 | Scheduled jobs | `journalctl -u wp-cron.service`, `journalctl -u wp-media-sync.service` | systemd journal | no |
@@ -1126,19 +1129,25 @@ not the visitor.** PHP gets the visitor's; OpenLiteSpeed's logs do not (see [Kno
 because every site logs separately. For referrers, user agents, viewer addresses, edge cache
 results and timings, use the CloudFront logs.
 
-**PHP errors are not logged by default.** PHP has no `error_log` set, and nothing PHP reports
-reaches any log above. To capture them for one site, set `WP_DEBUG` to `true` in its
-`wp-config.php` and add the two lines below next to it, restart OpenLiteSpeed so OPcache picks up
-the change, reproduce, then revert and restart again:
+**PHP errors go to each site's `php-error.log`.** Under LSAPI, PHP with no `error_log` set logs
+nowhere at all, and a plugin's fatal error is a 500 with no trace in any log. So each virtual host
+sets `error_log` as an admin value (`phpIniOverride` in `templates/vhconf.conf.tftpl`), so the file
+sits with the site's other logs on the file system, survives the instance, and is outside the
+document root. A plugin calling `error_log()` writes there too. With `WP_DEBUG` off, WordPress
+reports warnings and errors, not notices or deprecations. A logrotate rule from the bootstrap
+(`/etc/logrotate.d/wp-php-errors`) rotates it at 10 MB, keeping seven, as OpenLiteSpeed does its own.
+
+For notices and deprecations as well, set `WP_DEBUG` to `true` in the site's `wp-config.php` with
+the line below next to it, restart OpenLiteSpeed so OPcache picks up the change, reproduce, then
+revert and restart again. They land in the same `php-error.log`:
 
 ```php
-define( 'WP_DEBUG_LOG', '/var/www/<domain>/logs/php-debug.log' );
 define( 'WP_DEBUG_DISPLAY', false );
 ```
 
-Give `WP_DEBUG_LOG` a path, not `true`: `true` writes `wp-content/debug.log`, inside the document
-root and downloadable by anyone who guesses the URL. The site's `logs` directory is on the file
-system, outside the document root, and writable by the web user.
+`WP_DEBUG_DISPLAY` must be `false`: its default prints errors into pages, and CloudFront would cache
+them. `WP_DEBUG_LOG` changes nothing here. The admin value wins over it, which also means `true`
+can no longer write `wp-content/debug.log` into the document root, where anyone could download it.
 
 **Queries slower than a second are logged.** The parameter group sets `slow_query_log` and
 `long_query_time = 1`, and RDS exports the log to CloudWatch within minutes. Both parameters are
@@ -1150,6 +1159,7 @@ Reading them:
 ```sh
 # on the instance
 sudo tail -f /var/www/<domain>/logs/access.log /var/www/<domain>/logs/error.log
+sudo tail -n 50 /var/www/<domain>/logs/php-error.log
 sudo tail -n 50 /usr/local/lsws/logs/error.log
 sudo journalctl -u wp-media-sync.service -n 20
 
@@ -1247,6 +1257,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: <domain>' -H 'CloudFront-Forw
 
 ```sh
 systemctl is-active lsws; pgrep -c lsphp
+sudo tail -n 50 /var/www/<domain>/logs/php-error.log
 sudo tail -n 50 /usr/local/lsws/logs/error.log /var/www/<domain>/logs/error.log
 wp-site <domain> db check
 free -m; swapon --show
@@ -1477,7 +1488,6 @@ version lapses — see [Database](#database)) and **the canary schedule** (see [
 | Gap | Detail |
 | --- | ------ |
 | **OpenLiteSpeed logs edge addresses** | The per-site access logs show the CloudFront edge that connected, not the visitor. PHP gets the visitor's address from the origin guard, which reads `CloudFront-Viewer-Address`, and CloudFront's own logs have it. OpenLiteSpeed's `useIpInProxyHeader` could fix the logs, but not safely here (see [What looks harmless and is not](#what-looks-harmless-and-is-not)). While `enforce_origin_secret` is off, during a rotation, PHP sees edge addresses too. |
-| **PHP errors are not logged by default** | See [Logs](#logs) for capturing them per site. |
 | **Nothing replaces a broken instance** | EC2's default automatic recovery moves the instance to healthy hardware when its host fails, but a broken OS or web server is only reported, by the canary. No Auto Scaling group acts on it until the Scalable stage. |
 | **Content changes wait on the edge cache** | An edit or an approved comment reaches anonymous visitors within about 7 minutes, and on a quiet page one visit later. Nothing purges CloudFront on publish. A WordPress plugin that invalidates the changed pages (C3 CloudFront Cache Controller, for one) would make it immediate, at the cost of a plugin inside WordPress and AWS access of its own: PHP is deliberately kept from the instance role (see [Instance](#instance)). |
 | **Single Availability Zone** | The instance, the file system and the database each live in one zone. The Resilient stage fixes it. |

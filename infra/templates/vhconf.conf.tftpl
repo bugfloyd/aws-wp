@@ -21,6 +21,18 @@ accesslog $VH_ROOT/logs/access.log {
   compressArchive         1
 }
 
+# PHP's own errors: warnings and fatal errors, what a plugin breaks on. With
+# error_log unset, PHP under LSAPI logs them nowhere at all, and a fatal error
+# is a 500 with no trace in any log. Next to the site's other logs on the shared
+# file system, so it survives the instance, and outside the document root, so
+# it cannot be downloaded. An admin value, so neither a plugin nor WP_DEBUG_LOG
+# can point it into the document root instead. OpenLiteSpeed does not rotate
+# it; the bootstrap's logrotate rule does.
+phpIniOverride  {
+  php_admin_flag          log_errors On
+  php_admin_value         error_log /var/www/${domain}/logs/php-error.log
+}
+
 index  {
   useServer               0
   indexFiles              index.php, index.html

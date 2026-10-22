@@ -361,6 +361,27 @@ done
 flock -u 200
 echo "Released bootstrap lock"
 
+# Rotate each site's PHP error log, which PHP writes but nothing else rotates.
+# OpenLiteSpeed rolls its own logs at 10 MB and keeps a week; this matches the
+# size and keeps seven files. Checked daily by Ubuntu's logrotate timer.
+#
+# copytruncate, because PHP opens the file per message and is never told to
+# reopen it. "su", because the directory belongs to the web user: logrotate
+# then acts as that user, so a link planted there cannot make it read or
+# truncate a file only root may touch.
+cat > /etc/logrotate.d/wp-php-errors <<'PHPLOGROTATE'
+/var/www/*/logs/php-error.log {
+  su www-data www-data
+  size 10M
+  rotate 7
+  compress
+  delaycompress
+  missingok
+  notifempty
+  copytruncate
+}
+PHPLOGROTATE
+
 # ---------------------------------------------------------------------------
 # 8. Drive WordPress cron from exactly one instance
 # ---------------------------------------------------------------------------
