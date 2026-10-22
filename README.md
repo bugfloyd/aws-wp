@@ -274,8 +274,8 @@ things that live there, such as `security.txt` and app-association files.
 
 **So do plugins' backups, logs and form uploads, and leftover copies of any file.** Plugins written
 for Apache keep these behind an `.htaccess` `deny from all`, and OpenLiteSpeed reads only rewrite
-rules from `.htaccess`, so on the instance those folders are public to anyone who knows a file's
-name. Scanners do ask: `/wp-content/updraft/` was probed on 2026-10-21. The
+rules from `.htaccess` (see [Plugins](#plugins)), so on the instance those folders are public to
+anyone who knows a file's name. Scanners do ask: `/wp-content/updraft/` was probed on 2026-10-21. The
 edge refuses two things instead:
 
 - anything inside a directory in `edge_blocked_dirs` under `/wp-content/`: UpdraftPlus's
@@ -586,6 +586,45 @@ What to know when turning it on:
   header). CloudFront is the only page cache.
 - **Block themes inline most of their CSS**, so minification alone may change little; combining CSS
   is what produces files under `wp-content/litespeed/`.
+
+### Plugins
+
+Most plugins work unchanged. Two things here differ from the Apache host most plugins are written
+for, and each limits what a particular kind of plugin can do.
+
+**OpenLiteSpeed reads only rewrite rules from `.htaccess`.** Permalinks, redirect plugins and anything
+else built from `RewriteRule` work, and an edit applies at once without a restart. Everything else in
+an `.htaccess` is ignored, as tested with this stack's configuration:
+- access rules: `Deny from all`, `Require all denied` and `<Files>` blocks
+- `Header`, `ExpiresByType` and `php_value`
+
+PHP ignores `.user.ini` files too. So:
+- **A plugin that guards a folder with `deny from all` guards nothing here.** The edge does it instead
+  (`edge_blocked_dirs`, `edge_blocked_extensions`; see [Edge](#edge)).
+- **Headers a plugin writes into `.htaccess`, such as HSTS or other security headers, never reach a
+  browser.** PHP limits it raises there stay as `php_settings` says.
+- **Firewalls that install through `.user.ini` or `auto_prepend_file`**, such as Wordfence's extended
+  protection, stay in their basic mode. They also cannot displace the origin guard.
+
+**CloudFront is a shared page cache.** What a public page looked like for the visitor whose request
+filled the cache is what every anonymous visitor gets, for up to 12 hours. Plugins that build
+different HTML per visitor on the server, without a cookie that makes the request personal, need
+their JavaScript or AJAX mode:
+
+| Plugin does | What happens here | Do |
+| ----------- | ----------------- | -- |
+| Varies a page by device (`wp_is_mobile()` in a theme), country (geolocated banners or prices), browser language (Polylang's or WPML's language detection) or a cookie not in `cache_bypass_cookie_prefixes` (server-side cookie consent, a login plugin's own session) | One visitor's version goes to everyone. For a consent banner, that can mean one visitor's "accepted" page, tracking scripts included | The plugin's JavaScript or AJAX mode, or its cookie added to `cache_bypass_cookie_prefixes` |
+| Sets a cookie on every anonymous page (some language, analytics and affiliate plugins, or `session_start()` on every request) | Correct, but nothing is cached: every visit runs PHP | Check `x-cache` on a request without cookies; configure or replace the plugin |
+| Counts or picks at random in PHP: view counters, analytics without a cache mode, random testimonials, server-side A/B tests | Counts only cache misses; the random pick stays fixed for up to 12 hours | The JavaScript or REST mode |
+| Maintenance or coming-soon mode answering 503 | `stale-if-error` keeps serving the cached site for up to a day, so anonymous visitors never see the maintenance page | Invalidate `/*` after switching it on, or use a mode that answers 200 |
+| Regenerates its CSS or JavaScript under new names: Elementor's "Regenerate CSS", Autoptimize, LiteSpeed Cache | Pages cached at the edge point at the deleted files for up to 12 hours, and lose their styling wherever the old file is not cached | Invalidate `/*` afterwards (see [Debugging](#debugging)) |
+| Rewrites requests for year-folder media in `.htaccess`: WebP rewriting, hotlink protection, members-only media in `uploads/YYYY/` | Those files come from S3; the instance and its rewrite rules are not involved, so the rules never run and gated files are public | `<picture>` or URL-rewriting modes for WebP; gated files in the plugin's own folder |
+| Page caching (WP Rocket, W3 Total Cache, WP Super Cache, LiteSpeed Cache's page cache) | Duplicates CloudFront, and its purge never reaches CloudFront | Not installed; their asset optimisation alone is fine |
+| Uses XML-RPC (Jetpack, the WordPress mobile apps, pingbacks) | 403 at the edge | Remove `xmlrpc.php` from `edge_blocked_files` |
+| Takes longer than 120 seconds in one request: imports, a large update from the admin screens | 504 from CloudFront; the work may still finish on the instance | WP-CLI on the instance |
+
+Unpublishing or deleting a page takes as long to reach anonymous visitors as an edit: about
+7 minutes, and one visit more on a quiet page. Invalidate the path when it has to go at once.
 
 ### Naming
 
@@ -944,12 +983,95 @@ Create its hosted zone (add it to `websites` in `hostedzones/`), then add it to 
 apply. The instance is replaced, its bootstrap installs WordPress for the new domain, and the
 domain gets a certificate, a distribution, DNS records and a media bucket. Visit
 `https://<domain>/wp-admin/install.php` to finish the install. Until then its login page redirects
-to the installer, which the canary counts as a failure.
+to the installer, which the canary counts as a failure. **Finish it straight after the apply:**
+until someone does, anyone can, and whoever does gets an administrator account, which means code
+execution as `www-data`, and with it every site on the instance.
 
 The domain must be lowercase, and `<stack_name>-<domain>-media` must fit in S3's 63 characters; the
 plan refuses anything else. The new site cannot send email either, like the others (see
 [Known gaps](#known-gaps)): the installer's welcome message and every password reset are lost until a
 mail service is configured.
+
+### Importing an existing site
+
+A site from another host moves in on top of a fresh one. Add its domain as in
+[Adding a site](#adding-a-site), skip the installer, and replace the fresh site's database and
+`wp-content` with the old site's. The `wp-config.php` the bootstrap wrote stays. That is how the site
+gets what this stack depends on — the protocol shim, `DISABLE_WP_CRON`, `DISALLOW_FILE_EDIT` and
+minor core updates (see [A site](#a-site)) — while the old host's database settings, cache switches
+and `FORCE_SSL_ADMIN` stay behind. Without the shim, `FORCE_SSL_ADMIN` or an SSL plugin redirects
+forever, because PHP never sees HTTPS.
+
+**Recreate the domain's other DNS records first.** Delegating a domain to a new, empty Route 53 zone
+drops everything the old DNS host served: MX and the SPF, DKIM and DMARC records its email depends on,
+verification records, subdomains. Copy them into the zone before changing the name servers.
+
+**Import straight after the apply.** From the moment the domain's records point at CloudFront until
+the database is in, the domain answers with WordPress's installer, and anyone who completes it can
+take over the instance (see [Adding a site](#adding-a-site)). Stage the files first, so the gap is
+minutes.
+
+1. **On the old host**, export the database and pack `wp-content`, the root `.htaccess`, and any files
+   of your own in the document root, such as search engine verification files:
+
+   ```sh
+   wp db export old.sql
+   tar -czf old-files.tar.gz wp-content .htaccess
+   wp option get home        # the old URL
+   wp config get table_prefix
+   ```
+
+   A host without `.htaccess` (nginx) has none to pack. Afterwards, save Settings → Permalinks once
+   on the new site, and WordPress writes it: it counts OpenLiteSpeed as Apache.
+2. **Stage both in the config bucket**, which the instance can read, under `import/<domain>/`.
+3. **Add the domain** as in [Adding a site](#adding-a-site), and do not open the installer.
+4. **On the instance**, as root:
+
+   ```sh
+   export AWS_DEFAULT_REGION=eu-west-1
+   D=<domain>; H=/var/www/$D/html; B=<config_bucket_name>
+   aws s3 cp s3://$B/import/$D/old.sql /tmp/old.sql
+   aws s3 cp s3://$B/import/$D/old-files.tar.gz /tmp/old-files.tar.gz
+   wp-site $D db reset --yes
+   wp-site $D db import /tmp/old.sql
+   wp-site $D config set table_prefix <old prefix> --type=variable
+   rm -rf $H/wp-content && tar -xzf /tmp/old-files.tar.gz -C $H
+   rm -f $H/wp-content/object-cache.php $H/wp-content/advanced-cache.php
+   chown -R 33:33 $H
+   wp-site $D search-replace '<old URL>' "https://$D" --skip-columns=guid
+   wp-site $D core update-db
+   pkill -x lsphp
+   systemctl start wp-media-sync.service
+   rm -f /tmp/old.sql /tmp/old-files.tar.gz; aws s3 rm --recursive s3://$B/import/$D/
+   ```
+
+   - **`search-replace` is needed even if only the scheme changes**, from `http://` to `https://`.
+   - **`pkill -x lsphp` clears OPcache**, which still holds the fresh site's `wp-config.php` with its
+     table prefix. OpenLiteSpeed starts PHP again on the next request. Restarting OpenLiteSpeed is
+     not enough: LSPHP outlives it, OPcache included. Until PHP restarts, the site may keep showing
+     the installer.
+   - **Remove `object-cache.php` and `advanced-cache.php`.** They are drop-ins for an object cache
+     and a page cache this stage does not run, and an object cache drop-in that cannot reach its
+     server stops the site loading.
+   - **Delete the dump and the archive from the bucket afterwards.** They hold every user's password
+     hash, and the instance reads the whole bucket.
+
+5. **Check:**
+   - `https://<domain>/wp-admin/install.php` says WordPress is already installed
+   - the front page and a login work
+   - `wp-site <domain> option get home` prints the new URL
+
+These commands were run as written by the end-to-end test, importing a site with its own table
+prefix, a plain-`http` URL and an object cache drop-in.
+
+What the old site brings that may not fit:
+- **Constants of its own in the old `wp-config.php`**, such as plugin licence keys or WP Mail SMTP
+  settings, need copying across by hand.
+- **Must-use plugins from the old host** (`wp-content/mu-plugins/`), which managed hosts install for
+  their own caching and tooling, mean nothing here. Remove them.
+- **Page-cache plugins** duplicate CloudFront, and their purge never reaches it. Deactivate them (see
+  [Plugins](#plugins)).
+- **New salts** sign every user out once.
 
 ### Reaching the instance
 
