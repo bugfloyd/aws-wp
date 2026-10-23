@@ -151,7 +151,7 @@ takes the default behavior like any other request, served fresh from the file sy
 | Database, subnet group, parameter group | `<stack_name>-mysql`, `-db-subnet-group`, `-mysql84` | `database.tf` |
 | Rendered OpenLiteSpeed config | S3 bucket `config_bucket_name`, prefix `ols/` | `config_bucket.tf`, `bootstrap.tf` |
 | WebAdmin password | Parameter Store `/<stack_name>/ols/admin-password` | `bootstrap.tf` |
-| Media buckets, origin access control | `<stack_name>-<domain, dots as hyphens>-media`, `<stack_name>-media<edge_policy_suffix>` | `media.tf` |
+| Media buckets, origin access control | `<stack_name>-<domain, dots as hyphens>-media-<account ID>`, `<stack_name>-media<edge_policy_suffix>` | `media.tf` |
 | Certificates, distributions, DNS records | per domain | `cert_cloudfront_dns/` |
 | Edge caching rules | functions `<stack_name>-viewer-request`, `-viewer-response` and `-media-response`, cache policy `<stack_name>-pages`, origin request policy `<stack_name>-origin` — one of each, shared by every site | `edge_cache.tf`, `templates/viewer_request.js.tftpl`, `templates/viewer_response.js`, `templates/media_response.js.tftpl` |
 | Origin caching guard | `php/edge-cache.php` in the config bucket, loaded before every PHP request | `edge_cache.tf`, `templates/edge_cache.php.tftpl` |
@@ -364,10 +364,10 @@ not `s3:ListBucket`, and S3 will not confirm to such a caller whether a key exis
 object is `AccessDenied`. A criteria list of `[404]` never fails over. The criteria are
 403, 404, 500, 502, 503 and 504.
 
-**One media bucket per site per environment**, named `<stack_name>-<domain>-media` with the
-domain's dots as hyphens (`wp-prod-naz-li-media`): private,
-SSE-S3, Standard storage class, incomplete multipart uploads aborted after seven days. The instance
-writes through its own role, scoped to the media buckets only — there are no access keys anywhere.
+**One media bucket per site per environment**, named `<stack_name>-<domain>-media-<account ID>`
+with the domain's dots as hyphens (`wp-prod-naz-li-media-021934877834`): private, SSE-S3, Standard
+storage class, incomplete multipart uploads aborted after seven days. The instance writes through
+its own role, scoped to the media buckets only — there are no access keys anywhere.
 One origin access control serves every bucket, and each bucket's policy names the one distribution
 allowed to read it. A staging stack pointed at a production bucket would delete production media on
 its first sync, which is why the stack name is part of the bucket name.
@@ -637,7 +637,7 @@ stack in the same account — staging, or a replacement for production — is on
 | The account | IAM roles, policies, instance profile; CloudFront cache and origin request policies, CloudFront Functions, the origin access control | `stack_name`, plus `edge_policy_suffix` for the CloudFront ones |
 | The region | RDS instance, subnet and parameter groups; SNS topic; alarms; backup vault and plan; SSM parameter; key pair; canary | `stack_name` |
 | The VPC | security groups | nothing needed — every stack builds its own VPC |
-| All of AWS | S3 buckets | media buckets embed the domain; the config and log bucket names are variables |
+| All of AWS | S3 buckets | media buckets embed the domain and the account ID; the config and log bucket names are variables |
 
 **`edge_policy_suffix`** exists because a stack being replaced keeps its CloudFront policies until
 its distributions are deleted, so two generations of the same stack need different policy names.
@@ -645,10 +645,9 @@ its distributions are deleted, so two generations of the same stack need differe
 **Suffix explicit bucket names with the account ID.** A generic name can answer 404 to
 `head-bucket` and still fail creation with `BucketAlreadyExists`.
 
-**Media bucket names are the exception, and validated instead.** `<stack_name>-<domain>-media` has
-no account ID, so a domain whose name another account already holds fails at apply with
-`BucketAlreadyExists`. Adding a suffix now would mean new buckets and a copy for every existing site. The
-`domains` variable does check what it can at plan time: lowercase, and 63 characters at most.
+**Media bucket names get it automatically**: `<stack_name>-<domain>-media-<account ID>`. The
+`domains` variable checks at plan time that each domain is lowercase and that its bucket name fits
+S3's 63 characters.
 
 ### Versions
 
@@ -994,10 +993,10 @@ to the installer, which the canary counts as a failure. **Finish it straight aft
 until someone does, anyone can, and whoever does gets an administrator account, which means code
 execution as `www-data`, and with it every site on the instance.
 
-The domain must be lowercase, and `<stack_name>-<domain>-media` must fit in S3's 63 characters; the
-plan refuses anything else. The new site cannot send email either, like the others (see
-[Known gaps](#known-gaps)): the installer's welcome message and every password reset are lost until a
-mail service is configured.
+The domain must be lowercase, and `<stack_name>-<domain>-media-<account ID>` must fit in S3's 63
+characters; the plan refuses anything else. The new site cannot send email either, like the
+others (see [Known gaps](#known-gaps)): the installer's welcome message and every password reset
+are lost until a mail service is configured.
 
 ### Importing an existing site
 

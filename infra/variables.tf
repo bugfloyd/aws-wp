@@ -46,13 +46,14 @@ variable "domains" {
   type        = map(string)
 
   # Each domain names a media bucket, <stack_name>-<domain with dots as
-  # hyphens>-media, and S3 bucket names are lowercase and at most 63 characters.
+  # hyphens>-media-<account ID>, and S3 bucket names are lowercase and at most 63
+  # characters. An account ID is always twelve digits.
   validation {
     condition = alltrue([
       for d in keys(var.domains) :
-      d == lower(d) && length("${var.stack_name}-${replace(d, ".", "-")}-media") <= 63
+      d == lower(d) && length("${var.stack_name}-${replace(d, ".", "-")}-media-123456789012") <= 63
     ])
-    error_message = "Domains must be lowercase, and <stack_name>-<domain>-media must fit S3's 63-character bucket name limit."
+    error_message = "Domains must be lowercase, and <stack_name>-<domain>-media-<account ID> must fit S3's 63-character bucket name limit."
   }
 }
 

@@ -17,11 +17,17 @@
 locals {
   # Derived rather than read back off the resource, so the bootstrap template can
   # be rendered - and its shell syntax checked - before the buckets exist.
+  #
+  # The account ID keeps the names unique beyond this account, as it does for the
+  # config and log buckets. S3 names are global: a stack moved to another account
+  # could not reuse names its old buckets still held.
   media_bucket_names = {
     for d in keys(var.domains) :
-    d => "${var.stack_name}-${replace(d, ".", "-")}-media"
+    d => "${var.stack_name}-${replace(d, ".", "-")}-media-${data.aws_caller_identity.current.account_id}"
   }
 }
+
+data "aws_caller_identity" "current" {}
 
 resource "aws_s3_bucket" "media" {
   for_each = var.domains
