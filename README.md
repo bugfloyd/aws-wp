@@ -892,13 +892,16 @@ under `env:/<workspace>/`.
 
 **The bucket itself is `state-backend/`.** It is the one configuration that has to exist before the
 others, so on a new account it runs with local state and then moves its own state into the bucket
-it just created:
+it just created. Its S3 backend names no bucket, so a plain `terraform init` stops to ask for one: a
+gitignored override file swaps in a local backend for the first apply.
 
 ```sh
 cd state-backend
+printf 'terraform {\n  backend "local" {}\n}\n' > local_backend_override.tf
 terraform init
 terraform apply -var infra_state_bucket=<name>
-terraform init -backend-config backend_config.hcl -migrate-state
+rm local_backend_override.tf
+terraform init -backend-config backend_config.hcl -migrate-state -force-copy
 ```
 
 It keeps versioning on, which is the only way back from a corrupted or wrongly pushed state, and
