@@ -159,6 +159,7 @@ takes the default behavior like any other request, served fresh from the file sy
 | CloudFront logs and canary artifacts | S3 bucket `cloudfront_logging_bucket_name` | `logging_bucket.tf` |
 | Backups | vault `<stack_name>-backup-vault`, plan `<stack_name>-daily`, role `<stack_name>-backup-role` | `backup.tf` |
 | Alarms, SNS topic | `<stack_name>-*`, topic `<stack_name>-alerts` | `alerts.tf`, `fsx.tf`, `canary.tf` |
+| Mail identities, their DNS records, configuration set, events topic | SES identity per domain, configuration set `<stack_name>`, topic `<stack_name>-email-events` | `email.tf`, `email/` |
 | Synthetics canary | `<stack_name>-origin` | `canary.tf`, `canary_iam.tf` |
 | Hosted zones | one per domain | `hostedzones/` (separate state) |
 
@@ -627,6 +628,49 @@ their JavaScript or AJAX mode:
 Unpublishing or deleting a page takes as long to reach anonymous visitors as an edit: about
 7 minutes, and one visit more on a quiet page. Invalidate the path when it has to go at once.
 
+### Email
+
+**Every site's domain is an SES identity**, so mail sent as the site passes SPF, DKIM and DMARC.
+WordPress does not send through it yet, and that is the rest of the work: see
+[Known gaps](#known-gaps).
+
+| Record, in the site's zone | What it does |
+| -------------------------- | ------------ |
+| Three `<token>._domainkey.<domain>` CNAMEs | Easy DKIM: SES signs with a 2048-bit key and rotates it itself |
+| `bounce.<domain>` MX and SPF TXT | The envelope sender (MAIL FROM), which is what SPF checks. A subdomain of the site, so SPF aligns for DMARC, and the site's own SPF record and mail provider stay untouched: belenhein.com's mailboxes keep working |
+| `_dmarc.<domain>` TXT, `v=DMARC1; p=none` | Receivers evaluate DMARC but act on nothing |
+
+**Bounces, complaints and rejections** go to the SNS topic `<stack_name>-email-events`, which emails
+`alert_email` once its subscription is confirmed (see [Alerts](#alerts)). Every identity sends
+through the configuration set `<stack_name>` by default, so events arrive whatever sends the mail.
+Deliveries are left out. SES's account-level suppression list, on for bounces and complaints by
+default, stops repeat sends to an address that bounced or complained. The topic is not the alarms'
+topic: SES needs a topic policy naming it, and replacing the alarms' policy risks silencing them.
+
+**A new account sends from the SES sandbox:** only to verified addresses and the mailbox simulator, at
+most 200 messages a day, one a second. Leaving it is a request to AWS, made once per account and
+Region, with a first answer within 96 hours. Make it once the domains verify, which takes minutes after
+the apply:
+
+```sh
+aws sesv2 get-email-identity --email-identity <domain> \
+  --query '[VerifiedForSendingStatus,DkimAttributes.Status,MailFromAttributes.MailFromDomainStatus]'
+# true, SUCCESS, SUCCESS
+aws sesv2 put-account-details --production-access-enabled --mail-type TRANSACTIONAL \
+  --website-url https://<domain> --contact-language EN
+aws sesv2 get-account --query '[ProductionAccessEnabled,Details.ReviewDetails.Status]'
+```
+
+| Variable | Default | Changes |
+| -------- | ------- | ------- |
+| `enable_email` | `true` | the identities, their records, the configuration set and the topic |
+| `email_mail_from_subdomain` | `bounce` | the MAIL FROM subdomain; must not be a name the zone already uses |
+| `email_dmarc_record` | `v=DMARC1; p=none` | the DMARC record; `null` publishes none, for a domain whose DMARC lives elsewhere |
+
+To enforce DMARC later, change the record to `p=quarantine`, then `p=reject`. Every service that
+sends as the domain has to pass first: belenhein.com's mailboxes send through Namecheap Private Email,
+whose mail passes SPF but carries no DKIM signature for the domain.
+
 ### Naming
 
 Every resource whose name must be unique beyond the VPC is prefixed with `stack_name`, so a second
@@ -638,6 +682,7 @@ stack in the same account — staging, or a replacement for production — is on
 | The region | RDS instance, subnet and parameter groups; SNS topic; alarms; backup vault and plan; SSM parameter; key pair; canary | `stack_name` |
 | The VPC | security groups | nothing needed — every stack builds its own VPC |
 | All of AWS | S3 buckets | media buckets embed the domain and the account ID; the config and log bucket names are variables |
+| The account and Region, by domain | SES identities | nothing can: only one stack per account has `enable_email` on |
 
 **`edge_policy_suffix`** exists because a stack being replaced keeps its CloudFront policies until
 its distributions are deleted, so two generations of the same stack need different policy names.
@@ -1204,7 +1249,8 @@ FSx, with about five minutes of downtime. The order matters.
 
 1. **Workspace and variables.** `terraform workspace new <stack>`, and a `<stack>.tfvars` overriding
    `stack_name`, `key_pair_name = null`, `edge_policy_suffix`, both explicit bucket names, the
-   production database settings, and `db_snapshot_identifier`. `terraform.tfvars` still loads in
+   production database settings, `db_snapshot_identifier`, and `enable_email = false` (SES identities
+   are one per domain per account). `terraform.tfvars` still loads in
    every workspace, so anything that must be unique has to be overridden. Pass
    `-var-file=<stack>.tfvars` to every command.
 2. **Snapshot the current database** (`aws rds create-db-snapshot`).
@@ -1260,6 +1306,9 @@ FSx, with about five minutes of downtime. The order matters.
     - Move the new stack's state into the default workspace (`state pull`, then `state push -force`
       into the now-empty default state), fold `<stack>.tfvars` into `terraform.tfvars`, confirm
       `terraform plan` reports no changes, and delete the named workspace.
+    - Turn `enable_email` back on and apply. The destroy took the old identities with it, so mail
+      fails until the new ones verify, a few minutes later. Production access belongs to the
+      account and survives.
 
 With `enable_edge=false`, a new stack's canary checks the live domains, which the old stack is
 still serving; it proves nothing about the new one until cutover.
@@ -1294,6 +1343,9 @@ visitors.
 - **Certificates before the cutover**: `terraform apply -var enable_edge=true -target=` each
   domain's `aws_acm_certificate_validation`. ACM's validation records differ per account, so copy the
   new ones into the old zones too, for resolvers still on the old delegation.
+- **Email, days ahead**: SES production access belongs to the account, so request it in the new one
+  together with the zones (see [Email](#email)); it can take four days. DKIM keys differ per account
+  too: copy the new `_domainkey` records into the old zones, like the certificates' validation records.
 - **Refresh the database at cutover**: on the old instance, `wp-site <domain> db export`; upload the
   dump into the new config bucket's `import/<domain>/` with a presigned PUT URL made with the new
   account's credentials, which needs no IAM change on either side; on the new instance,
@@ -1410,6 +1462,11 @@ aws sns list-subscriptions-by-topic --topic-arn $(terraform output -raw alerts_t
   --query 'Subscriptions[].[Endpoint,SubscriptionArn]' --output text
 # a full ARN means confirmed; "PendingConfirmation" or "Deleted" means no email is sent
 ```
+
+**SES's bounce and complaint events have a topic and a subscription of their own**,
+`<stack_name>-email-events` (`terraform output email_events_topic_arn`), with a confirmation link of
+its own: check and confirm it the same way. Each event arrives as the JSON SES publishes; the
+recipient is under `bounce.bouncedRecipients` or `complaint.complainedRecipients`.
 
 **To stop a subscription vanishing**, confirm it from the CLI instead of clicking the link. Copy
 the `Token` parameter out of the confirmation link and pass it with
@@ -1707,6 +1764,8 @@ Each site added is still $0.60 a month more in metrics — more than the site's 
   which is why `availability_zone` is set.
 - **Database backups.** RDS backup storage up to the provisioned 20 GB is free.
 - **File system backups** cost $0.05 per GB-month, about $0.06 at this data size.
+- **Email.** SES identities, the configuration set and the DNS records are free; mail costs $0.10 per
+  1,000 messages once WordPress sends it, and the first 1,000 event emails a month are free.
 
 **Tax comes on top** — 21 % VAT on this account, making it about $70.
 
@@ -1729,7 +1788,7 @@ version lapses — see [Database](#database)) and **the canary schedule** (see [
 | **Server logs do not survive replacement** | Per-site logs live on the file system; the bootstrap and server logs do not. |
 | **Large admin-panel updates are bounded** | By the 120-second origin timeout. WP-CLI is not. |
 | **Service-created logs never expire** | The canary's and RDS's CloudWatch log groups have no retention and outlive their canary or database; canary artifacts in S3 follow the log bucket's five-year lifecycle. |
-| **WordPress cannot send email** | The image has no mail transfer agent, and nothing relays to a mail service. `wp_mail()` fails on every site: password resets, comment notifications, contact forms, update notices. A lost-password request still looks successful. Outbound mail through SES is planned as a separate change. Until then, a site that must send mail needs an SMTP plugin configured with a real mail service. |
+| **WordPress cannot send email** | The image has no mail transfer agent, and nothing relays to a mail service. `wp_mail()` fails on every site: password resets, comment notifications, contact forms, update notices. A lost-password request still looks successful. Every domain is a verified SES identity (see [Email](#email)), but WordPress has no way to reach it yet: PHP is kept from the instance role, so it needs SMTP credentials of its own, and a new account sends only to verified addresses until AWS grants production access. Until then, a site that must send mail needs an SMTP plugin configured with a real mail service. |
 | **Provider versions float** | `.terraform.lock.hcl` is not committed, so providers resolve within their constraints at `init`. |
 
 ---
@@ -1807,6 +1866,7 @@ once there are several instances.
 | `infra/backup.tf` | Backup vault, plan, selection, role |
 | `infra/alerts.tf` | SNS topic, instance and database alarms |
 | `infra/canary.tf`, `canary_iam.tf` | Synthetics canary, its alarm and role |
+| `infra/email.tf`, `infra/email/` | SES identities with their DKIM, MAIL FROM and DMARC records, the configuration set, the events topic and its subscription |
 | `infra/edge_cache.tf` | CloudFront Functions, the shared cache and origin request policies, the origin guard |
 | `infra/cert_cloudfront_dns/` | Per-domain certificate, distribution, policies, DNS records |
 | `infra/templates/bootstrap.sh.tftpl` | Instance bootstrap |
@@ -1817,7 +1877,7 @@ once there are several instances.
 
 Outputs: `webserver_public_ip`, `webserver_public_dns`, `db_endpoint`, `db_master_secret_arn`,
 `fsx_file_system_id`, `fsx_dns_name`, `media_buckets`, `backup_vault_name`, `alerts_topic_arn`,
-`ols_admin_password_parameter`.
+`ols_admin_password_parameter`, `email_configuration_set`, `email_events_topic_arn`.
 
 ## Related projects
 

@@ -263,8 +263,36 @@ variable "canary_runtime_version" {
 }
 
 variable "alert_email" {
-  description = "Address that CloudWatch alarms notify. AWS sends a confirmation link that must be clicked once before anything is delivered"
+  description = "Address that CloudWatch alarms and SES bounce and complaint events notify. AWS sends a confirmation link per topic that must be clicked once before anything is delivered"
   type        = string
+}
+
+variable "enable_email" {
+  description = "Make every site's domain an SES identity: DKIM keys, a MAIL FROM subdomain and a DMARC record in its zone, and bounce and complaint events to alert_email. Identities are unique per account and Region, so a second stack in the same account, such as a replacement, keeps this off until the first stack is gone"
+  type        = bool
+  default     = true
+}
+
+variable "email_mail_from_subdomain" {
+  description = "Subdomain of each site that SES sends from as the envelope sender, with its own MX and SPF records. SPF then aligns for DMARC without touching the site's own SPF record or mail provider"
+  type        = string
+  default     = "bounce"
+
+  validation {
+    condition     = can(regex("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", var.email_mail_from_subdomain))
+    error_message = "A single DNS label: lowercase letters, digits and hyphens."
+  }
+}
+
+variable "email_dmarc_record" {
+  description = "The _dmarc TXT record published for every site, or null to publish none, for domains whose DMARC is managed elsewhere. p=none asks receivers only to evaluate; nothing is rejected or quarantined"
+  type        = string
+  default     = "v=DMARC1; p=none"
+
+  validation {
+    condition     = var.email_dmarc_record == null || startswith(coalesce(var.email_dmarc_record, "-"), "v=DMARC1;")
+    error_message = "A DMARC record starts with \"v=DMARC1;\"."
+  }
 }
 
 variable "origin_read_timeout" {
