@@ -1264,6 +1264,63 @@ FSx, with about five minutes of downtime. The order matters.
 With `enable_edge=false`, a new stack's canary checks the live domains, which the old stack is
 still serving; it proves nothing about the new one until cutover.
 
+### Moving to another account
+
+How production moved to a different AWS account: the procedure above, with every step that relied
+on sharing an account replaced. Three sites, 39,736 files; about seven minutes of downtime for most
+visitors.
+
+- **A separate checkout** (`git worktree add`) with its own `backend_config.hcl` and
+  `terraform.tfvars`, and a gitignored `account_override.tf` in each configuration setting
+  `allowed_account_ids` on every provider. A command run with the wrong profile then fails instead
+  of acting on the other account. No workspace or `<stack>.tfvars`: the stacks never share a state.
+- **`stack_name` stays.** Every bucket name carries the account ID, so only the config and log
+  bucket names in `terraform.tfvars` change; media bucket names follow by themselves.
+- **Hosted zones first, days ahead.** Zones cannot move between accounts. Create them in the new
+  account, copy every record, compare the two, and change the name servers at the registrar. Resolvers
+  keep the old delegation for up to 48 hours.
+- **The image**: share the AMI and its snapshot with the new account, `aws ec2 copy-image` it
+  there, and remove the share. The copy owns its own snapshot.
+- **The database**: snapshots encrypted with the AWS-managed `aws/rds` key cannot be shared. Copy
+  the snapshot under a temporary customer-managed KMS key whose policy admits the new account, share
+  that copy, and copy it again from the new account, which re-encrypts it under its own `aws/rds`.
+  Restore from it with `db_snapshot_identifier`, then delete the shared copy and schedule the key's
+  deletion.
+- **The files**: DataSync cannot copy between file systems in different accounts. Use two tasks
+  through an S3 bucket in the new account: old FSx to the bucket, run from the old account with a
+  role the bucket policy admits; then the bucket to the new FSx. S3 keeps each file's owner and mode
+  as object metadata, so both survive. A bucket policy rejects a role created seconds earlier as an
+  invalid principal: retry.
+- **Certificates before the cutover**: `terraform apply -var enable_edge=true -target=` each
+  domain's `aws_acm_certificate_validation`. ACM's validation records differ per account, so copy the
+  new ones into the old zones too, for resolvers still on the old delegation.
+- **Refresh the database at cutover**: on the old instance, `wp-site <domain> db export`; upload the
+  dump into the new config bucket's `import/<domain>/` with a presigned PUT URL made with the new
+  account's credentials, which needs no IAM change on either side; on the new instance,
+  `db reset --yes`, `db import`, then `pkill -x lsphp`.
+  - **A server with GTIDs writes `SQL_LOG_BIN` and `GTID_PURGED` statements into the dump**, and the
+    WordPress user may not run them. Strip them before the import, or it fails after `db reset`
+    has already emptied the database:
+    `sed -i -E '/SQL_LOG_BIN|GTID_PURGED/d' <dump>`.
+  - The instance role cannot delete from the config bucket. Remove the dumps from outside: they
+    hold password hashes.
+- **Releasing the old aliases**: CloudFront refuses the default certificate without a protocol
+  version. Set `Aliases` to `{"Quantity": 0}` and `ViewerCertificate` to
+  `{"CloudFrontDefaultCertificate": true, "MinimumProtocolVersion": "TLSv1"}`.
+- **The cutover apply replaces the instance.** The origin guard trusts `CloudFront-Viewer-Address`
+  only while `enable_edge` is on, so the guard, `config_revision` and the user data all change.
+  `DB_HOST` lives on the file system and survives. The distributions wait for the new instance's
+  Elastic IP, then take about three minutes.
+- **Point the old zones at the new stack the moment the apply finishes**: apex and `www` aliases to
+  the new distributions, and `origin.<domain>` to the new Elastic IP. CloudFront resolves
+  `origin.<domain>` itself, and some edges were still on the old delegation. Until the mirror they
+  reached the old instance, whose origin guard answered 403: 128 requests over 90 minutes, because
+  the mirror was late.
+- **Retiring**: `terraform state rm` every `aws_route53_record` in the old state, because the old
+  zones now point at the new stack. Then empty and destroy as in step 10. Delete the old zones once
+  every domain has been delegated to the new ones for 48 hours; a zone must be empty of all but its
+  own NS and SOA records first.
+
 ---
 
 ## Logs
