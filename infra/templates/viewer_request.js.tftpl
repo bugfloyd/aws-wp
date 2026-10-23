@@ -18,7 +18,8 @@ var INSTANCE_IPS = ${jsonencode(instance_ips)};
 // personalised: logged-in users and commenters share these cached copies.
 var STATIC_FILE = /\.(css|js|mjs|map|png|jpe?g|gif|webp|avif|svg|ico|bmp|tiff?|woff2?|ttf|otf|eot|mp4|m4v|webm|ogv|mp3|m4a|ogg|oga|wav|flac|pdf|zip|gz)$/i;
 
-// A rotated or compressed copy: error.log.1, dump.sql.gz.
+// A rotated or compressed copy, one suffix deep or more: error.log.1,
+// dump.sql.gz, error.log.2.gz.
 var COPY_SUFFIX = /^(gz|zip|bz2|xz|[0-9]+)$/;
 
 function handler(event) {
@@ -102,14 +103,10 @@ function isBlocked(uri, viewerIp) {
 function hasBlockedExtension(name) {
     var parts = name.split('.');
     var last = parts.length - 1;
-    if (last < 1) {
-        return false;
+    while (last > 1 && COPY_SUFFIX.test(parts[last])) {
+        last--;
     }
-    if (BLOCKED_EXTENSIONS.indexOf(parts[last]) !== -1) {
-        return true;
-    }
-    return last >= 2 && COPY_SUFFIX.test(parts[last]) &&
-        BLOCKED_EXTENSIONS.indexOf(parts[last - 1]) !== -1;
+    return last >= 1 && BLOCKED_EXTENSIONS.indexOf(parts[last]) !== -1;
 }
 
 // Logged in, a commenter who saved their details, an unlocked password-protected
