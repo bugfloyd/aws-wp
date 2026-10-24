@@ -1154,6 +1154,18 @@ Two applies, with records created in the site's DNS after each:
    at a zone apex an ALIAS, ANAME or flattened CNAME. In Route 53 in another account, an alias A
    record to the distribution's name.
 
+   **Only once the distribution resolves:** after the apply has finished, when
+   `dig +short <distribution>.cloudfront.net` answers. Until then an alias to it answers with no
+   address, and resolvers cache that empty answer for the zone's negative TTL: 15 minutes in a Route
+   53 zone with its default SOA record. On 2026-10-24, records changed three minutes early kept
+   www.neurolytics.ai unresolvable through Google Public DNS until five minutes after the
+   distribution was ready.
+
+   When the hostnames come from another CloudFront distribution, there is no rush. Every edge
+   serves whichever distribution holds a hostname, whatever address DNS gave, so the old records
+   reach the new distribution as soon as it is deployed, for as long as the old distribution
+   exists and its name resolves.
+
 Until step 5 the hostnames reach whatever served them before, and the canary checks that.
 
 ### Importing an existing site
@@ -1187,7 +1199,8 @@ minutes.
    ```
 
    A host without `.htaccess` (nginx) has none to pack. Afterwards, save Settings → Permalinks once
-   on the new site, and WordPress writes it: it counts OpenLiteSpeed as Apache.
+   on the new site, and WordPress writes it: it counts OpenLiteSpeed as Apache. Then restart
+   OpenLiteSpeed, as in step 4.
 2. **Stage both in the config bucket**, which the instance can read, under `import/<domain>/`.
 3. **Add the domain** as in [Adding a site](#adding-a-site), and do not open the installer.
 4. **On the instance**, as root:
@@ -1203,11 +1216,12 @@ minutes.
    rm -rf $H/wp-content && tar -xzf /tmp/old-files.tar.gz -C $H
    rm -f $H/wp-content/object-cache.php $H/wp-content/advanced-cache.php
    chown -R 33:33 $H
+   /usr/local/lsws/bin/lswsctrl restart
    wp-site $D search-replace '<old URL>' "https://$D" --skip-columns=guid
    wp-site $D core update-db
    pkill -x lsphp
    systemctl start wp-media-sync.service
-   rm -f /tmp/old.sql /tmp/old-files.tar.gz; aws s3 rm --recursive s3://$B/import/$D/
+   rm -f /tmp/old.sql /tmp/old-files.tar.gz
    ```
 
    - **`search-replace` is needed even if only the scheme changes**, from `http://` to `https://`.
@@ -1215,11 +1229,26 @@ minutes.
      table prefix. OpenLiteSpeed starts PHP again on the next request. Restarting OpenLiteSpeed is
      not enough: LSPHP outlives it, OPcache included. Until PHP restarts, the site may keep showing
      the installer.
+   - **`lswsctrl restart` makes OpenLiteSpeed read the imported `.htaccess`.** It reads a site's
+     `.htaccess` when it starts, and the bootstrap writes none, so a fresh site has none then. One
+     that appears later is ignored until a restart; every permalink is then OpenLiteSpeed's own 404,
+     and only the front page and real files such as `wp-login.php` work. Edits to an `.htaccess`
+     that existed at start apply at once. The restart is graceful (SIGUSR1): requests in flight
+     finish.
    - **Remove `object-cache.php` and `advanced-cache.php`.** They are drop-ins for an object cache
      and a page cache this stage does not run, and an object cache drop-in that cannot reach its
      server stops the site loading.
-   - **Delete the dump and the archive from the bucket afterwards.** They hold every user's password
-     hash, and the instance reads the whole bucket.
+   - **Delete the dump and the archive from the bucket afterwards, with your own credentials.** They
+     hold every user's password hash, and the instance reads the whole bucket. The instance cannot
+     delete them: its role may only read the config bucket. The bucket is versioned, so
+     `aws s3 rm` only hides them behind a delete marker. Remove every version and marker:
+
+     ```sh
+     B=<config_bucket_name>; D=<domain>
+     aws s3api list-object-versions --bucket $B --prefix import/$D/ \
+       --query '[Versions, DeleteMarkers][][].[Key, VersionId]' --output text |
+       while read -r k v; do aws s3api delete-object --bucket $B --key "$k" --version-id "$v"; done
+     ```
 
 5. **Check:**
    - `https://<domain>/wp-admin/install.php` says WordPress is already installed
@@ -1227,7 +1256,9 @@ minutes.
    - `wp-site <domain> option get home` prints the new URL
 
 These commands were run as written by the end-to-end test, importing a site with its own table
-prefix, a plain-`http` URL and an object cache drop-in.
+prefix, a plain-`http` URL and an object cache drop-in. Two steps came from importing neurolytics.ai
+into production (2026-10-24): the OpenLiteSpeed restart, without which every permalink was a 404,
+and deleting the staged files from outside the instance, run as written on the config bucket.
 
 What the old site brings that may not fit:
 - **Constants of its own in the old `wp-config.php`**, such as plugin licence keys or WP Mail SMTP
