@@ -1,0 +1,23 @@
+// Viewer response for year-folder media: what browsers are told when the
+// origin says nothing. The bucket's objects carry no Cache-Control, so without
+// this browsers fall back to their own heuristics.
+//
+// A response that already has a Cache-Control keeps it: the instance's own
+// lifetime for a file the sync has not copied yet. And only successful
+// responses get here. CloudFront does not run viewer response functions for
+// status 400 or above, so an error - both origins failing during an instance
+// replacement, say - is never marked cacheable. A response headers policy
+// would have been simpler, and would have added the header to those errors.
+//
+// It does not change how long CloudFront keeps the file, which is
+// CachingOptimized's day.
+
+function handler(event) {
+    var response = event.response;
+
+    if (!response.headers['cache-control']) {
+        response.headers['cache-control'] = { value: 'public, max-age=${ttl}' };
+    }
+
+    return response;
+}

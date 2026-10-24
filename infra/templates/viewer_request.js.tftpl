@@ -1,0 +1,126 @@
+// Viewer request: runs before CloudFront looks in its cache, and decides whether
+// this request may share a cached copy with everyone else.
+//
+// CloudFront cache policies cannot match cookie names by prefix, and WordPress
+// suffixes its cookies with a per-site hash, so the decision is made here and
+// expressed as one header the cache policy does include in the key.
+
+var BYPASS_COOKIE_PREFIXES = ${jsonencode(bypass_cookie_prefixes)};
+var BLOCKED_FILES = ${jsonencode(blocked_files)};
+var BLOCKED_DIRS = ${jsonencode(blocked_dirs)};
+var BLOCKED_EXTENSIONS = ${jsonencode(blocked_extensions)};
+
+// The instance's own address. What it requests through CloudFront arrives from
+// here, and only it may reach wp-cron.php.
+var INSTANCE_IPS = ${jsonencode(instance_ips)};
+
+// Served straight from disk by OpenLiteSpeed, never through PHP, so never
+// personalised: logged-in users and commenters share these cached copies.
+var STATIC_FILE = /\.(css|js|mjs|map|png|jpe?g|gif|webp|avif|svg|ico|bmp|tiff?|woff2?|ttf|otf|eot|mp4|m4v|webm|ogv|mp3|m4a|ogg|oga|wav|flac|pdf|zip|gz)$/i;
+
+// A rotated or compressed copy, one suffix deep or more: error.log.1,
+// dump.sql.gz, error.log.2.gz.
+var COPY_SUFFIX = /^(gz|zip|bz2|xz|[0-9]+)$/;
+
+function handler(event) {
+    var request = event.request;
+
+    if (isBlocked(request.uri, event.viewer.ip)) {
+        return {
+            statusCode: 403,
+            statusDescription: 'Forbidden',
+            headers: {
+                'content-type': { value: 'text/plain; charset=utf-8' },
+                'cache-control': { value: 'no-store' }
+            },
+            body: 'Forbidden'
+        };
+    }
+
+    // Only this function sets the header; a copy sent by the viewer is dropped.
+    delete request.headers['x-wp-cache-bypass'];
+
+    if (STATIC_FILE.test(request.uri)) {
+        return request;
+    }
+
+    if (isPersonal(request)) {
+        // A value no other request will ever carry: the request is never served
+        // from the cache, and nothing its response produces is served to anyone
+        // else.
+        request.headers['x-wp-cache-bypass'] = { value: event.context.requestId };
+    }
+
+    return request;
+}
+
+// A blocked file anywhere in the path, in any case, including with trailing
+// path info ("/xmlrpc.php/x" still runs xmlrpc.php). The exception is
+// wp-cron.php requested by the instance itself: Site Health's loopback test,
+// and plugins that start a cron run of their own, request it through
+// CloudFront.
+//
+// Anything inside a blocked directory under /wp-content/. Plugins keep
+// backups, logs and form uploads there behind an .htaccess "deny from all",
+// which OpenLiteSpeed ignores: it reads only rewrite rules from .htaccess.
+// Only under /wp-content/, so a page whose slug happens to match still works.
+//
+// Any file with a blocked extension, or a rotated or compressed copy of one:
+// logs, database dumps, and the copies editors and backups leave behind, such
+// as wp-config.php.bak. WordPress never serves one, and OpenLiteSpeed would
+// hand any of them out as plain text.
+//
+// Also any path segment starting with a dot, other than /.well-known/.
+// WordPress never serves one, and they are most of what scanners ask for -
+// /.env, /.git/config, /.aws/credentials - each of which would otherwise
+// render a full WordPress 404 on the origin. CloudFront has already resolved
+// "." and ".." segments before this runs.
+function isBlocked(uri, viewerIp) {
+    var path = uri;
+    try {
+        path = decodeURIComponent(uri);
+    } catch (e) {
+        // Malformed escapes: judge the raw path.
+    }
+    var segments = path.toLowerCase().split('/');
+    var inContent = segments[1] === 'wp-content';
+    for (var i = 0; i < segments.length; i++) {
+        var segment = segments[i];
+        if (BLOCKED_FILES.indexOf(segment) !== -1 &&
+            !(segment === 'wp-cron.php' && INSTANCE_IPS.indexOf(viewerIp) !== -1)) {
+            return true;
+        }
+        if (inContent && i > 1 && BLOCKED_DIRS.indexOf(segment) !== -1) {
+            return true;
+        }
+        if (segment.charAt(0) === '.' && segment !== '.well-known') {
+            return true;
+        }
+    }
+    return hasBlockedExtension(segments[segments.length - 1]);
+}
+
+function hasBlockedExtension(name) {
+    var parts = name.split('.');
+    var last = parts.length - 1;
+    while (last > 1 && COPY_SUFFIX.test(parts[last])) {
+        last--;
+    }
+    return last >= 1 && BLOCKED_EXTENSIONS.indexOf(parts[last]) !== -1;
+}
+
+// Logged in, a commenter who saved their details, an unlocked password-protected
+// post, a shop cart or session - or the REST API reached through a query string.
+function isPersonal(request) {
+    if (request.querystring.rest_route) {
+        return true;
+    }
+    for (var name in request.cookies) {
+        for (var i = 0; i < BYPASS_COOKIE_PREFIXES.length; i++) {
+            if (name.indexOf(BYPASS_COOKIE_PREFIXES[i]) === 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}

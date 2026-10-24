@@ -1,0 +1,92 @@
+<?php
+/*
+ * The origin guard: the visitor's address, and edge caching rules for every
+ * PHP response on this server.
+ *
+ * Loaded before any site's code through auto_prepend_file, from outside every
+ * document root. Installed by the bootstrap; not a WordPress plugin.
+ *
+ * CloudFront caches whatever the origin lets it. WordPress marks logged-in
+ * pages, password-protected posts and 404s no-cache itself and says nothing
+ * about the rest, which CloudFront would then keep for its default TTL. This
+ * makes the decision explicit, just before the headers leave:
+ *
+ * - A response that sets a cookie is never cached. CloudFront stores Set-Cookie
+ *   with the object and replays it on every cache hit, so one visitor's session
+ *   would be handed to everyone after them.
+ * - A response whose application already chose a Cache-Control keeps it.
+ * - A public GET or HEAD answered 200, 203, 300, 301, 308 or 410 is kept by
+ *   CloudFront for ${ttl} seconds, then served stale while it refreshes for up
+ *   to ${swr} seconds, and served stale while the origin is failing for up to
+ *   ${sie} seconds. Browsers are told no-cache by the viewer response function;
+ *   these directives are for CloudFront.
+ * - Anything else - temporary redirects, errors - is never cached.
+ */
+
+if (PHP_SAPI === 'cli') {
+    return;
+}
+%{ if trust_viewer_address ~}
+
+/*
+ * OpenLiteSpeed sees the CloudFront edge that connected, so PHP would record
+ * that edge as every visitor: comment addresses, spam checks, login limits.
+ * CloudFront sends the viewer's own address and port in
+ * CloudFront-Viewer-Address ("198.51.100.10:46532").
+ *
+ * Trusted only while the origin secret is enforced: the virtual host then
+ * refuses, before PHP runs, anything that did not come through this stack's
+ * distributions, and those set the header themselves. Requests over loopback
+ * carry none and keep 127.0.0.1. Not OpenLiteSpeed's useIpInProxyHeader: see
+ * httpd_config.conf.
+ */
+(static function () {
+    if (!isset($_SERVER['HTTP_CLOUDFRONT_VIEWER_ADDRESS'])) {
+        return;
+    }
+    $viewer = (string) $_SERVER['HTTP_CLOUDFRONT_VIEWER_ADDRESS'];
+    $port   = strrpos($viewer, ':');
+    if ($port !== false) {
+        $viewer = trim(substr($viewer, 0, $port), '[]');
+    }
+    if (filter_var($viewer, FILTER_VALIDATE_IP) !== false) {
+        $_SERVER['REMOTE_ADDR'] = $viewer;
+    }
+})();
+%{ endif ~}
+
+header_register_callback(static function () {
+    $sets_cookie   = false;
+    $cache_control = false;
+
+    foreach (headers_list() as $header) {
+        $name = strtolower(trim((string) strstr($header, ':', true)));
+        if ($name === 'set-cookie') {
+            $sets_cookie = true;
+        } elseif ($name === 'cache-control') {
+            $cache_control = true;
+        }
+    }
+
+    $never = 'Cache-Control: no-cache, must-revalidate, max-age=0, no-store, private';
+
+    if ($sets_cookie) {
+        header($never);
+        return;
+    }
+
+    if ($cache_control) {
+        return;
+    }
+
+    $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+    if ($method !== 'GET' && $method !== 'HEAD') {
+        return;
+    }
+
+    if (in_array(http_response_code(), [200, 203, 300, 301, 308, 410], true)) {
+        header('Cache-Control: public, max-age=0, s-maxage=${ttl}, stale-while-revalidate=${swr}, stale-if-error=${sie}');
+    } else {
+        header($never);
+    }
+});
