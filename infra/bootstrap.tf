@@ -26,10 +26,14 @@ resource "aws_ssm_parameter" "ols_admin_password" {
 }
 
 locals {
-  domains_list = keys(var.domains)
+  domains_list = keys(local.sites)
 
-  # Rendered once with a placeholder rather than per domain; the bootstrap loop
-  # substitutes the real domain for each site it sets up.
+  # Every name a site answers to besides its domain: its aliases, and the name
+  # CloudFront reaches the instance by.
+  vhost_aliases = { for d, s in local.sites : d => concat(s.aliases, [s.origin]) }
+
+  # Rendered once with placeholders rather than per domain; the bootstrap loop
+  # substitutes the real domain and its aliases for each site it sets up.
   vhost_config = templatefile("${path.module}/templates/vhconf.conf.tftpl", {
     domain        = "__DOMAIN__"
     origin_secret = var.enforce_origin_secret ? random_password.origin_secret.result : ""
@@ -37,6 +41,7 @@ locals {
 
   httpd_config = templatefile("${path.module}/templates/httpd_config.conf.tftpl", {
     domains            = local.domains_list
+    aliases            = local.vhost_aliases
     http_port          = var.webserver_http_port
     enable_cache       = var.enable_ols_cache ? 1 : 0
     php_children       = var.php_children
@@ -53,6 +58,7 @@ locals {
     ols_admin_param = aws_ssm_parameter.ols_admin_password.name
     http_port       = var.webserver_http_port
     domain_list     = join(" ", [for d in local.domains_list : "\"${d}\""])
+    vhost_aliases   = { for d, a in local.vhost_aliases : d => join(", ", a) }
     config_bucket   = aws_s3_bucket.config.id
     php_settings    = var.php_settings
 

@@ -1,10 +1,11 @@
+# Built once the certificate can be issued: CloudFront accepts an alias only
+# with a valid certificate that covers it.
 resource "aws_cloudfront_distribution" "cloudfront" {
+  count = var.dns_ready ? 1 : 0
+
   comment = "CloudFront for ${var.domain}"
 
-  aliases = [
-    var.domain,
-    "www.${var.domain}"
-  ]
+  aliases = concat([var.domain], var.aliases)
 
   enabled         = true
   http_version    = "http2"
@@ -216,7 +217,7 @@ resource "aws_cloudfront_distribution" "cloudfront" {
   }
 
   viewer_certificate {
-    acm_certificate_arn      = aws_acm_certificate_validation.cert_validation.certificate_arn
+    acm_certificate_arn      = aws_acm_certificate_validation.cert_validation[0].certificate_arn
     ssl_support_method       = "sni-only"
     minimum_protocol_version = "TLSv1.2_2021"
   }
@@ -244,29 +245,18 @@ resource "aws_cloudfront_distribution" "cloudfront" {
   })
 }
 
-resource "aws_route53_record" "main_dns_record" {
+# The site's hostnames, in a zone of ours. Keyed by the name relative to the
+# domain - "@" for the domain itself, "www" for www.<domain> - so the keys stay
+# put across domains and the moves in main.tf can name them.
+resource "aws_route53_record" "hostname" {
+  for_each = var.hosted_zone_id != null && var.dns_ready ? local.hostnames : {}
+
   zone_id = var.hosted_zone_id
-  name    = var.domain
+  name    = each.value
   type    = "A"
 
   alias {
-    name                   = aws_cloudfront_distribution.cloudfront.domain_name
-    zone_id                = "Z2FDTNDATAQYW2" # CloudFront's Hosted Zone ID
-    evaluate_target_health = false
-  }
-
-  # A cutover repoints an existing alias record at a different distribution.
-  # Without this the apply fails because the record already exists.
-  allow_overwrite = true
-}
-
-resource "aws_route53_record" "www_dns_record" {
-  zone_id = var.hosted_zone_id
-  name    = "www.${var.domain}"
-  type    = "A"
-
-  alias {
-    name                   = aws_cloudfront_distribution.cloudfront.domain_name
+    name                   = aws_cloudfront_distribution.cloudfront[0].domain_name
     zone_id                = "Z2FDTNDATAQYW2" # CloudFront's Hosted Zone ID
     evaluate_target_health = false
   }
@@ -291,15 +281,26 @@ resource "aws_route53_record" "www_dns_record" {
 # not-yet-mirrored upload on one site returned another site's 404 page. A
 # single-site stack cannot show this, because its catch-all is the right site.
 #
+# It lives under the platform's own domain rather than the site's, so a site
+# whose DNS is hosted elsewhere never has to point a record at the instance, and
+# the name does not change hands when the site's DNS does.
+#
 # Publicly resolvable, and harmless: the instance only accepts port 80 from
-# CloudFront's managed prefix list.
+# CloudFront's managed prefix list, carrying the origin secret.
 resource "aws_route53_record" "origin" {
-  zone_id = var.hosted_zone_id
-  name    = "origin.${var.domain}"
+  zone_id = var.origin_zone_id
+  name    = var.origin_name
   type    = "A"
   ttl     = 300
   records = [var.instance_public_ip]
 
   # A replacement stack claims the same name while the old one still holds it.
   allow_overwrite = true
+
+  # A new name is in place before the distribution switches to it, and the old
+  # one goes only once the distribution has deployed without it. Otherwise
+  # edges still on the old configuration would look up a name that is gone.
+  lifecycle {
+    create_before_destroy = true
+  }
 }

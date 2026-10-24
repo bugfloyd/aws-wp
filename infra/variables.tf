@@ -42,8 +42,25 @@ variable "admin_public_key" {
 }
 
 variable "domains" {
-  description = "Map of domain names to their Route 53 hosted zone IDs"
-  type        = map(string)
+  description = <<-EOT
+    The sites, keyed by domain. Every field is optional:
+    - zone_id: the Route 53 hosted zone in this account that the site's records are written into - the
+      domain's own zone, a delegated zone for a subdomain, or the zone of a domain above it. Leave it
+      out for DNS hosted elsewhere (another AWS account, Cloudflare, a registrar): nothing is written,
+      and the dns_records output lists what to create there.
+    - aliases: other hostnames the site answers to. "www.<domain>" unless set; [] for none.
+    - email: false keeps the domain out of SES.
+    - dmarc_record: this site's DMARC record instead of email_dmarc_record; "" publishes none.
+    - dns_ready: for DNS hosted elsewhere, set once the certificate's validation records exist, so the
+      certificate can be waited for and the distribution built.
+  EOT
+  type = map(object({
+    zone_id      = optional(string)
+    aliases      = optional(list(string))
+    email        = optional(bool, true)
+    dmarc_record = optional(string)
+    dns_ready    = optional(bool, false)
+  }))
 
   # Each domain names a media bucket, <stack_name>-<domain with dots as
   # hyphens>-media-<account ID>, and S3 bucket names are lowercase and at most 63
@@ -55,6 +72,39 @@ variable "domains" {
     ])
     error_message = "Domains must be lowercase, and <stack_name>-<domain>-media-<account ID> must fit S3's 63-character bucket name limit."
   }
+
+  validation {
+    condition = alltrue(flatten([
+      for d, s in var.domains : [for a in(s.aliases == null ? [] : s.aliases) : a == lower(a) && a != d]
+    ]))
+    error_message = "Aliases must be lowercase, and must not repeat their own site's domain."
+  }
+
+  # A hostname belongs to one distribution at a time, so to one site.
+  validation {
+    condition = (
+      length(flatten([for d, s in var.domains : concat([d], s.aliases == null ? ["www.${d}"] : s.aliases)])) ==
+      length(distinct(flatten([for d, s in var.domains : concat([d], s.aliases == null ? ["www.${d}"] : s.aliases)])))
+    )
+    error_message = "A hostname can belong to only one site, as its domain or as an alias."
+  }
+
+  validation {
+    condition = alltrue([
+      for s in values(var.domains) : s.dmarc_record == null ? true : s.dmarc_record == "" || startswith(s.dmarc_record, "v=DMARC1;")
+    ])
+    error_message = "A DMARC record starts with \"v=DMARC1;\"; \"\" publishes none."
+  }
+}
+
+variable "origin_domain" {
+  description = "Domain under which every site gets the name CloudFront reaches the instance by, <domain>.<origin_domain>. It belongs to the platform, not to any site, so a site whose DNS is hosted elsewhere never needs a record pointing at the instance"
+  type        = string
+}
+
+variable "origin_zone_id" {
+  description = "Route 53 hosted zone in this account that holds origin_domain"
+  type        = string
 }
 
 variable "cloudfront_logging_bucket_name" {
@@ -285,7 +335,7 @@ variable "email_mail_from_subdomain" {
 }
 
 variable "email_dmarc_record" {
-  description = "The _dmarc TXT record published for every site, or null to publish none, for domains whose DMARC is managed elsewhere. p=none asks receivers only to evaluate; nothing is rejected or quarantined"
+  description = "The _dmarc TXT record published for every site, or null to publish none, for domains whose DMARC is managed elsewhere. A site's own dmarc_record overrides it. p=none asks receivers only to evaluate; nothing is rejected or quarantined"
   type        = string
   default     = "v=DMARC1; p=none"
 

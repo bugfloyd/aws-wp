@@ -4,8 +4,11 @@ variable "name" {
 }
 
 variable "domains" {
-  description = "Map of domain names to their Route 53 hosted zone IDs"
-  type        = map(string)
+  description = "The domains to make SES identities, each with the Route 53 hosted zone its records are written into - null for DNS hosted elsewhere, whose records go to dns_records instead - and its DMARC record, null for none"
+  type = map(object({
+    zone_id      = string
+    dmarc_record = string
+  }))
 }
 
 variable "mail_from_subdomain" {
@@ -13,8 +16,3 @@ variable "mail_from_subdomain" {
   type        = string
 }
 
-variable "dmarc_record" {
-  description = "The _dmarc TXT record for every domain, or null for none"
-  type        = string
-  default     = null
-}

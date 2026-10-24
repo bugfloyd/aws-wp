@@ -49,7 +49,7 @@ Figures for unbuilt stages are estimates carried forward from this stage's measu
 ## Architecture
 
 ```
-                         Route 53  (apex and www alias records per site)
+           the site's DNS: Route 53 here, or anywhere else (domain and aliases per site)
                             |
                  CloudFront + ACM + edge functions       TLS terminates here
                     |                         \
@@ -60,7 +60,7 @@ Figures for unbuilt stages are estimates carried forward from this stage's measu
                     |                     2. on 403/404/500/502-504: instance
                     |                            |
                     v   plain HTTP, port 80      v
-              origin.<domain>  ->  Elastic IP
+         <domain>.origin.<platform domain>  ->  Elastic IP
    +---------------------------------------------------+   public subnet  10.20.1.0/24
    | EC2 t3.micro, OpenLiteSpeed + LSPHP 8.3           |   port 80 from CloudFront + secret
    | configures itself at boot from user data          |   port 22 from admin_ips
@@ -152,7 +152,7 @@ takes the default behavior like any other request, served fresh from the file sy
 | Rendered OpenLiteSpeed config | S3 bucket `config_bucket_name`, prefix `ols/` | `config_bucket.tf`, `bootstrap.tf` |
 | WebAdmin password | Parameter Store `/<stack_name>/ols/admin-password` | `bootstrap.tf` |
 | Media buckets, origin access control | `<stack_name>-<domain, dots as hyphens>-media-<account ID>`, `<stack_name>-media<edge_policy_suffix>` | `media.tf` |
-| Certificates, distributions, DNS records | per domain | `cert_cloudfront_dns/` |
+| Certificates, distributions, DNS records | per domain; origin names `<domain>.<origin_domain>` | `main.tf`, `cert_cloudfront_dns/` |
 | Edge caching rules | functions `<stack_name>-viewer-request`, `-viewer-response` and `-media-response`, cache policy `<stack_name>-pages`, origin request policy `<stack_name>-origin` — one of each, shared by every site | `edge_cache.tf`, `templates/viewer_request.js.tftpl`, `templates/viewer_response.js`, `templates/media_response.js.tftpl` |
 | Origin caching guard | `php/edge-cache.php` in the config bucket, loaded before every PHP request | `edge_cache.tf`, `templates/edge_cache.php.tftpl` |
 | Origin secret | `random_password.origin_secret`, sent as `X-Origin-Verify`, checked by a virtual host rewrite rule | `main.tf`, `cert_cloudfront_dns/cloudfront.tf`, `templates/vhconf.conf.tftpl` |
@@ -161,7 +161,7 @@ takes the default behavior like any other request, served fresh from the file sy
 | Alarms, SNS topic | `<stack_name>-*`, topic `<stack_name>-alerts` | `alerts.tf`, `fsx.tf`, `canary.tf` |
 | Mail identities, their DNS records, configuration set, events topic | SES identity per domain, configuration set `<stack_name>`, topic `<stack_name>-email-events` | `email.tf`, `email/` |
 | Synthetics canary | `<stack_name>-origin` | `canary.tf`, `canary_iam.tf` |
-| Hosted zones | one per domain | `hostedzones/` (separate state) |
+| Hosted zones | one per domain whose DNS is here, and one for the platform domain | `hostedzones/` (separate state) |
 
 ---
 
@@ -190,7 +190,7 @@ why the data subnets come as a pair.
 
 ### Edge
 
-**TLS terminates at CloudFront with an ACM certificate** (apex plus `www`, DNS-validated), and the
+**TLS terminates at CloudFront with an ACM certificate** (the domain plus its aliases, DNS-validated), and the
 origin is plain HTTP. Certificates are state: a renewal job on a disposable instance is a failure
 waiting to happen, and ACM renews by itself. Minimum TLS 1.2, SNI only, HTTP/2, IPv4 only,
 viewers redirected to HTTPS.
@@ -198,7 +198,7 @@ viewers redirected to HTTPS.
 **The origin is locked twice: by security group and by a shared secret.** Port 80 accepts only
 `com.amazonaws.global.cloudfront.origin-facing`, AWS's managed prefix list — but that list covers
 every CloudFront distribution in AWS, not only this stack's, so on its own anyone could point a
-distribution of theirs at `origin.<domain>` and serve the sites through it. So each of this stack's
+distribution of theirs at a site's origin name and serve the sites through it. So each of this stack's
 distributions adds an `X-Origin-Verify` header carrying a random 40-character value, and
 OpenLiteSpeed answers 403 to any request without it — pages and static files alike. The instance's
 own requests over the loopback interface are exempt: wp-cron, the bootstrap's health check, and
@@ -294,11 +294,13 @@ links straight to the files in `woocommerce_uploads`. Use "Force downloads", its
 the directory from the list. Year-folder media is not checked, because that path's behavior runs
 no viewer request function.
 
-**CloudFront reaches the instance as `origin.<domain>`**, a per-site A record for the Elastic IP,
-and OpenLiteSpeed lists that name for its site. The media behavior cannot forward the viewer's
-`Host` — S3 reads `Host` to decide which bucket a request is for — so when it falls back to the
-instance, the origin's own name is the `Host` the instance receives. With one shared origin name,
-every site's fallback lands on the catch-all site. A single-site stack cannot show this.
+**CloudFront reaches the instance as `<domain>.<origin_domain>`** — `naz.li.origin.wpcloud.fast` —
+a per-site A record for the Elastic IP, and OpenLiteSpeed lists that name for its site. The media
+behavior cannot forward the viewer's `Host` — S3 reads `Host` to decide which bucket a request is
+for — so when it falls back to the instance, the origin's own name is the `Host` the instance
+receives. With one shared origin name, every site's fallback lands on the catch-all site. A
+single-site stack cannot show this. The names live under a domain of the platform's own rather than
+in each site's zone (see [DNS](#dns)).
 
 **Origin read timeout is 120 seconds** rather than the default 30: this account's "Response
 timeout per origin" quota, which AWS raises on request. An admin action that rewrites thousands of
@@ -312,6 +314,69 @@ comment — returned 502, about twice a day.
 **The edge can be switched off.** `enable_edge = false` builds everything except certificates,
 distributions and DNS. A CloudFront alternate domain name belongs to one distribution at a time,
 account-wide, so a replacement stack is built and verified this way and gets its edge at cutover.
+
+### DNS
+
+**A site's DNS can be hosted here or anywhere else.** Each entry in `domains` either names a Route
+53 zone in this account (`zone_id`), and Terraform writes every record the site needs into it, or
+names none, and Terraform writes nothing into the site's DNS: the `dns_records` output lists the
+records, and whoever manages that DNS creates them. That covers a zone in another AWS account,
+Cloudflare, a registrar's DNS, and a company zone the site may not take over.
+
+| The site's DNS | Example | `domains` entry | Created by hand, once |
+| -------------- | ------- | --------------- | --------------------- |
+| Its own zone here | `naz.li` | `{ zone_id = "<its zone>" }` | NS records at the registrar |
+| A subdomain's zone here | `blog.example.com`, delegated | `{ zone_id = "<that zone>", aliases = [] }` | 4 NS records in the parent's DNS |
+| A parent's zone here | `blog.example.com` in this account's `example.com` | `{ zone_id = "<example.com's zone>", aliases = [] }` | nothing |
+| Hosted elsewhere | `neurolytics.ai` in another account | `{}`, and `dns_ready` later | every record in `dns_records` |
+
+A delegated subdomain's zone is all of that subdomain: this account then answers for every name
+under `blog.example.com`, and nothing else of `example.com`.
+
+**Origin names live under the platform's own domain**, `origin_domain`, not in each site's zone.
+They point at the instance, and a record pointing at the instance should not have to sit in someone
+else's DNS, nor be updated there when the Elastic IP changes in a stack replacement or an account
+move. The zone holding them, `wpcloud.fast` here, comes from `hostedzones/` like the sites' zones.
+`origin_domain` can be any name in a zone of this account: with only `example.com`, it can be
+`origin.example.com` in that zone, and no second domain is needed.
+
+**That makes the platform domain a single point of failure for every site.** If it stops resolving
+— the registration lapses, its delegation at the registrar breaks, its zone is deleted — CloudFront
+cannot reach the instance for any site, and every uncached request fails at once; cached pages carry
+on for up to a day. And whoever controls its registrar account can point every origin name at a
+server of their own, which then receives every site's uncached traffic, origin secret included, and
+answers it. Guard it accordingly:
+
+- **At the registrar:** automatic renewal, the transfer lock, and two-factor sign-in on the account.
+  A renewal reminder of your own too: nothing here warns before the domain expires.
+- **In Terraform:** the platform zone has `prevent_destroy`, so no plan can delete it.
+- **Detection:** the canary requests `wp-login.php` through CloudFront every hour, so a resolution
+  failure raises its alarm within one run.
+
+**A site whose DNS is elsewhere takes two applies.** ACM issues a certificate only once it can
+resolve the validation records, and CloudFront accepts an alias only with an issued certificate.
+Where Terraform writes the records, one apply waits for both. Where it cannot, the first apply
+requests the certificate and stops there; `dns_ready = true` says the records exist, and the second
+apply waits for the certificate and builds the distribution. Without the switch the first apply
+would wait, until it timed out, for records nobody could have created yet.
+
+**`www.<domain>` is an alias by default**, as every site here has always had: covered by the
+certificate, the distribution and OpenLiteSpeed, and redirected by WordPress to the domain.
+`aliases = []` drops it, which a subdomain site wants — `www.blog.example.com` is nobody's
+address.
+
+**What DNS hosted elsewhere has to allow:**
+
+- **The domain itself needs an ALIAS, ANAME or flattened CNAME if it is a zone apex.** CloudFront has
+  no fixed addresses, and an apex cannot hold a CNAME. Route 53 in another account aliases to a
+  distribution in this one; Cloudflare flattens a CNAME at the apex; Namecheap offers an ALIAS
+  record. Where none of those exists, serve the site as `www.<domain>` with `aliases = []`, and let
+  the DNS host redirect the apex.
+- **Cloudflare must not proxy the site** (DNS only, the grey cloud). Through Cloudflare's proxy,
+  CloudFront sees Cloudflare as the visitor, and so does WordPress.
+- **CAA records, if the domain has any, must allow `amazon.com`**, or ACM cannot issue.
+- **The validation records stay.** ACM renews against them, and any later certificate for the same
+  hostname in this account reuses them.
 
 ### Storage
 
@@ -632,9 +697,10 @@ Unpublishing or deleting a page takes as long to reach anonymous visitors as an 
 
 **Every site's domain is an SES identity**, so mail sent as the site passes SPF, DKIM and DMARC.
 WordPress does not send through it yet, and that is the rest of the work: see
-[Known gaps](#known-gaps).
+[Known gaps](#known-gaps). A site with `email = false` is left out — one whose domain already sends
+through SES in another account, or whose owner has not agreed to the records below.
 
-| Record, in the site's zone | What it does |
+| Record, in the site's zone, or in `dns_records` for DNS hosted elsewhere | What it does |
 | -------------------------- | ------------ |
 | Three `<token>._domainkey.<domain>` CNAMEs | Easy DKIM: SES signs with a 2048-bit key and rotates it itself |
 | `bounce.<domain>` MX and SPF TXT | The envelope sender (MAIL FROM), which is what SPF checks. A subdomain of the site, so SPF aligns for DMARC, and the site's own SPF record and mail provider stay untouched: belenhein.com's mailboxes keep working |
@@ -666,6 +732,16 @@ aws sesv2 get-account --query '[ProductionAccessEnabled,Details.ReviewDetails.St
 | `enable_email` | `true` | the identities, their records, the configuration set and the topic |
 | `email_mail_from_subdomain` | `bounce` | the MAIL FROM subdomain; must not be a name the zone already uses |
 | `email_dmarc_record` | `v=DMARC1; p=none` | the DMARC record; `null` publishes none, for a domain whose DMARC lives elsewhere |
+| `domains[*].email` | `true` | `false` leaves the site out of SES altogether |
+| `domains[*].dmarc_record` | `email_dmarc_record` | this site's DMARC record; `""` publishes none |
+
+**A site on someone else's subdomain should publish no DMARC record** (`dmarc_record = ""`).
+Receivers look up `_dmarc.<subdomain>` before the parent's record, so `p=none` there would override a
+parent's `p=reject` for every message sent as the subdomain.
+
+**Create a domain's DKIM records within 72 hours** of the apply that adds it, when its DNS is
+elsewhere. SES stops looking after that and marks the identity failed, and verification has to be
+restarted (the console's Retry, under the identity's DKIM settings).
 
 To enforce DMARC later, change the record to `p=quarantine`, then `p=reject`. Every service that
 sends as the domain has to pass first: belenhein.com's mailboxes send through Namecheap Private Email,
@@ -791,8 +867,11 @@ sudo sed -i "s/define( 'AUTOMATIC_UPDATER_DISABLED', true );/define( 'WP_AUTO_UP
 sudo pkill -x lsphp
 ```
 
-**Virtual host.** Each site answers to `<domain>`, `www.<domain>` and `origin.<domain>`; the first
-site in the list also takes `*`, so a request matching nothing still reaches a site. Document root
+**Virtual host.** Each site answers to `<domain>`, its aliases (`www.<domain>` unless set otherwise)
+and its origin name, `<domain>.<origin_domain>`; the first site in the list also takes `*`, so a
+request matching nothing still reaches a site. OpenLiteSpeed also maps `www.<domain>` to a site
+whose aliases leave it out: it tries a name without its `www.` before falling back to `*`. Nothing
+sends one, since CloudFront forwards only a distribution's own aliases. Document root
 `/var/www/<domain>/html`, `.htaccess` rewrite rules honoured, gzip and Brotli on.
 
 ### Scheduled jobs
@@ -914,7 +993,9 @@ Cost Explorer is queried in `us-east-1`.
 
 - An AWS account and the AWS CLI
 - [Terraform](https://developer.hashicorp.com/terraform/downloads) 1.10 or later
-- Domains delegated to Route 53
+- A domain of the platform's own for origin names, delegated to Route 53 (see [DNS](#dns))
+- For each site, its DNS either delegated to Route 53 in this account, or managed somewhere you can
+  add records
 - An AMI built from [aws-ols-mariadb-ami](https://github.com/bugfloyd/aws-ols-mariadb-ami) with
   `-var profile=web`, **in the same region as the stack** — images are regional, and one built
   elsewhere simply cannot be launched here. It must include `lsphp83-curl`, which the web profile
@@ -956,15 +1037,18 @@ schedule. On an account where the bucket already exists, adopt it with an `impor
 applying.
 
 **Hosted zones first**, deployed separately so domain records outlive the infrastructure — a
-`destroy` in `infra/` never touches DNS. Set `websites` to the list of domains, apply, and delegate
-each domain to the name servers it outputs:
+`destroy` in `infra/` never touches DNS. Set `platform_domain` to the platform's domain and
+`websites` to the domains whose DNS is to be here — none, if every site's DNS is elsewhere — apply,
+and delegate each to the name servers it outputs:
 
 ```sh
 cd hostedzones
 terraform init -backend-config backend_config.hcl
 terraform apply
-terraform output hosted_zone_name_servers   # delegate the domain to these
-terraform output hosted_zone_ids            # the IDs infra/ needs in `domains`
+terraform output platform_zone_name_servers # delegate the platform domain to these
+terraform output platform_zone_id           # origin_zone_id in infra/
+terraform output hosted_zone_name_servers   # delegate each site's domain to these
+terraform output hosted_zone_ids            # the zone_id of each site in infra/'s `domains`
 ```
 
 **A zone that already exists** — created by hand, or by a configuration being retired — is adopted
@@ -984,7 +1068,9 @@ import {
 ```hcl
 stack_name                     = "wp-prod"
 ols_image_id                   = "ami-..."
-domains                        = { "example.com" = "Z0123456789" }   # domain => hosted zone ID
+domains                        = { "example.com" = { zone_id = "Z0123456789" } }
+origin_domain                  = "origin.example.net"   # under the platform domain
+origin_zone_id                 = "Z9876543210"          # the platform domain's zone
 admin_ips                      = ["203.0.113.10/32"]
 admin_public_key               = "ssh-ed25519 ..."
 config_bucket_name             = "wp-prod-config-123456789012"
@@ -1033,10 +1119,12 @@ Destroying the file system also leaves a final backup behind (see
 
 ### Adding a site
 
-Create its hosted zone (add it to `websites` in `hostedzones/`), then add it to `domains` and
-apply. The instance is replaced, its bootstrap installs WordPress for the new domain, and the
-domain gets a certificate, a distribution, DNS records and a media bucket. Visit
-`https://<domain>/wp-admin/install.php` to finish the install. Until then its login page redirects
+Pick where its DNS lives (see [DNS](#dns)). For a zone here, create it (add it to `websites` in
+`hostedzones/`) and delegate it, or use the zone of a domain above it. Then add the site to
+`domains` with that `zone_id`, and `aliases = []` for a subdomain, and apply. The instance is
+replaced, its bootstrap installs WordPress for the new domain, and the domain gets a certificate, a
+distribution, DNS records and a media bucket. Visit `https://<domain>/wp-admin/install.php` to
+finish the install. Until then its login page redirects
 to the installer, which the canary counts as a failure. **Finish it straight after the apply:**
 until someone does, anyone can, and whoever does gets an administrator account, which means code
 execution as `www-data`, and with it every site on the instance.
@@ -1045,6 +1133,28 @@ The domain must be lowercase, and `<stack_name>-<domain>-media-<account ID>` mus
 characters; the plan refuses anything else. The new site cannot send email either, like the
 others (see [Known gaps](#known-gaps)): the installer's welcome message and every password reset
 are lost until a mail service is configured.
+
+### Adding a site whose DNS is hosted elsewhere
+
+Two applies, with records created in the site's DNS after each:
+
+1. **Add it without a `zone_id`**, and with `email = false` unless its DNS owner has agreed to the
+   SES records (see [Email](#email)): `"example.com" = { email = false }`. Apply. The instance is
+   replaced and WordPress installed as for any site; the certificate is requested and waits.
+2. **Create the validation records** that `terraform output dns_records` lists for the domain, and
+   the email records if email is on. They are permanent: renewals use them.
+3. **Set `dns_ready = true` and apply.** The apply waits for ACM to issue the certificate, a few
+   minutes once the records resolve, then builds the distribution. The canary checks the site from
+   here on.
+4. **Finish the install, or the import, at once**, before the public DNS changes. The installer is now
+   open to anyone who finds the distribution and sends it the site's hostname. Reach it yourself
+   through a hosts-file entry pointing the hostname at one of the distribution's addresses
+   (`dig +short <distribution>.cloudfront.net`).
+5. **Point the hostnames at the distribution**, from the records `dns_records` now adds: a CNAME, or
+   at a zone apex an ALIAS, ANAME or flattened CNAME. In Route 53 in another account, an alias A
+   record to the distribution's name.
+
+Until step 5 the hostnames reach whatever served them before, and the canary checks that.
 
 ### Importing an existing site
 
@@ -1056,9 +1166,10 @@ minor core updates (see [A site](#a-site)) — while the old host's database set
 and `FORCE_SSL_ADMIN` stay behind. Without the shim, `FORCE_SSL_ADMIN` or an SSL plugin redirects
 forever, because PHP never sees HTTPS.
 
-**Recreate the domain's other DNS records first.** Delegating a domain to a new, empty Route 53 zone
-drops everything the old DNS host served: MX and the SPF, DKIM and DMARC records its email depends on,
-verification records, subdomains. Copy them into the zone before changing the name servers.
+**Recreate the domain's other DNS records first**, if its DNS moves here. Delegating a domain to a
+new, empty Route 53 zone drops everything the old DNS host served: MX and the SPF, DKIM and DMARC
+records its email depends on, verification records, subdomains. Copy them into the zone before
+changing the name servers. A site whose DNS stays where it is skips this.
 
 **Import straight after the apply.** From the moment the domain's records point at CloudFront until
 the database is in, the domain answers with WordPress's installer, and anyone who completes it can
@@ -1295,8 +1406,8 @@ FSx, with about five minutes of downtime. The order matters.
    about five minutes after any launch), and the subscription is confirmed.
 10. **Retire the old stack after several days**, once the new one has its own backups:
     - Snapshot its database by hand: a destroy deletes the automated backups too.
-    - Remove from its state the DNS records the new stack now owns — the apex and `www` aliases
-      **and the `cert_validation` records**. ACM reuses one validation record per domain per
+    - Remove from its state the DNS records the new stack now owns — the `hostname` and `origin`
+      records **and the `cert_validation` records**. ACM reuses one validation record per domain per
       account, so destroying them succeeds and silently breaks the new certificates' renewal.
     - Empty its buckets, versions and delete markers included (`aws s3 rm` on a versioned bucket
       only adds markers), and delete its vault's recovery points.
@@ -1325,9 +1436,10 @@ visitors.
   of acting on the other account. No workspace or `<stack>.tfvars`: the stacks never share a state.
 - **`stack_name` stays.** Every bucket name carries the account ID, so only the config and log
   bucket names in `terraform.tfvars` change; media bucket names follow by themselves.
-- **Hosted zones first, days ahead.** Zones cannot move between accounts. Create them in the new
-  account, copy every record, compare the two, and change the name servers at the registrar. Resolvers
-  keep the old delegation for up to 48 hours.
+- **Hosted zones first, days ahead**, the platform domain's included. Zones cannot move between
+  accounts. Create them in the new account, copy every record, compare the two, and change the name
+  servers at the registrar. Resolvers keep the old delegation for up to 48 hours. A site whose DNS is
+  hosted elsewhere has no zone to move: its records change at cutover, like its hostnames.
 - **The image**: share the AMI and its snapshot with the new account, `aws ec2 copy-image` it
   there, and remove the share. The copy owns its own snapshot.
 - **The database**: snapshots encrypted with the AWS-managed `aws/rds` key cannot be shared. Copy
@@ -1364,8 +1476,9 @@ visitors.
   `DB_HOST` lives on the file system and survives. The distributions wait for the new instance's
   Elastic IP, then take about three minutes.
 - **Point the old zones at the new stack the moment the apply finishes**: apex and `www` aliases to
-  the new distributions, and `origin.<domain>` to the new Elastic IP. CloudFront resolves
-  `origin.<domain>` itself, and some edges were still on the old delegation. Until the mirror they
+  the new distributions, and the origin names — then `origin.<domain>`, now
+  `<domain>.<origin_domain>` in the old platform zone — to the new Elastic IP. CloudFront resolves
+  the origin name itself, and some edges were still on the old delegation. Until the mirror they
   reached the old instance, whose origin guard answered 403: 128 requests over 90 minutes, because
   the mirror was late.
 - **Retiring**: `terraform state rm` every `aws_route53_record` in the old state, because the old
@@ -1567,8 +1680,8 @@ OpenLiteSpeed itself did not start; see its `error.log`.
 action may still have finished on the instance; re-check, and use WP-CLI for anything that large.
 
 **An image on one site shows another site's page.** The fallback reached the instance with a `Host`
-no virtual host matches. Check that `origin.<domain>` resolves to the Elastic IP and appears in the
-listener map in `/usr/local/lsws/conf/httpd_config.conf`.
+no virtual host matches. Check that `<domain>.<origin_domain>` resolves to the Elastic IP and appears
+in the listener map in `/usr/local/lsws/conf/httpd_config.conf`.
 
 **A new image is broken for a few minutes.** It is waiting for the next sync and the instance
 fallback failed; see the previous entry. To mirror at once: `sudo systemctl start wp-media-sync.service`.
@@ -1735,7 +1848,7 @@ the account's other resources. About **$58 a month before tax**, for three low-t
 | EC2 `t3.micro` | $0.0114 per hour | $8.32 |
 | Public IPv4 address (the Elastic IP; billed whether or not attached) | $0.005 per hour | $3.65 |
 | EBS gp3 root volume, 20 GB | $0.088 per GB-month | $1.76 |
-| Route 53, three hosted zones | $0.50 per zone | $1.50 |
+| Route 53, four hosted zones: three sites and the platform domain | $0.50 per zone | $2.00 |
 | Canary runs, hourly | $0.0014 per run | $1.02 |
 | Canary metrics, 11 of them | $0.30 per metric-month | $3.30, less 10 free: **$0.30** |
 | CloudWatch alarms, six alarm metrics | $0.10 per alarm-month | $0.60, less 10 free: **$0** |
@@ -1770,7 +1883,8 @@ Each site added is still $0.60 a month more in metrics — more than the site's 
 **Tax comes on top** — 21 % VAT on this account, making it about $70.
 
 The file system is 42 % of the bill and buys speed, not savings. Adding a site to an existing
-stack costs a hosted zone, two canary metrics and some requests — about $1.20 a month. Two costs
+stack costs a hosted zone, two canary metrics and some requests — about $1.20 a month, or $0.50
+less for a site whose DNS is elsewhere. Two costs
 worth watching: **RDS Extended Support** ($172 a month on this instance class if the engine
 version lapses — see [Database](#database)) and **the canary schedule** (see [Alerts](#alerts)).
 
@@ -1851,7 +1965,7 @@ once there are several instances.
 | Path | Contents |
 | ---- | -------- |
 | `state-backend/` | The S3 bucket holding every other configuration's state |
-| `hostedzones/` | Route 53 hosted zones, separate state |
+| `hostedzones/` | Route 53 hosted zones for the platform domain and for sites whose DNS is here, separate state |
 | `infra/backend.tf` | S3 backend, provider requirements |
 | `infra/main.tf` | Providers, the per-domain edge module |
 | `infra/variables.tf` | Every input, with defaults and validation |

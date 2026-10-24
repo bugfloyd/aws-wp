@@ -100,7 +100,7 @@ resource "aws_cloudfront_origin_access_control" "media" {
 # from the criteria, a not-yet-synced upload returns AccessDenied instead of
 # falling back to the instance.
 data "aws_iam_policy_document" "media" {
-  for_each = var.enable_edge ? aws_s3_bucket.media : {}
+  for_each = { for d, b in aws_s3_bucket.media : d => b if local.sites[d].distribution }
 
   statement {
     sid       = "AllowCloudFrontRead"
@@ -122,7 +122,7 @@ data "aws_iam_policy_document" "media" {
 }
 
 resource "aws_s3_bucket_policy" "media" {
-  for_each = var.enable_edge ? aws_s3_bucket.media : {}
+  for_each = { for d, b in aws_s3_bucket.media : d => b if local.sites[d].distribution }
 
   bucket = each.value.id
   policy = data.aws_iam_policy_document.media[each.key].json

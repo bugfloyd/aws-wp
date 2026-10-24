@@ -1,10 +1,32 @@
 variable "domain" {
-  description = "Domain name for SSL certificate and redirects"
+  description = "The site's domain: the certificate's name and the distribution's first alias"
   type        = string
 }
 
+variable "aliases" {
+  description = "Other hostnames the site answers to, covered by the same certificate and distribution"
+  type        = list(string)
+  default     = []
+}
+
 variable "hosted_zone_id" {
-  description = "The Hosted Zone ID for the domain"
+  description = "Route 53 hosted zone the site's records are written into, or null for DNS hosted elsewhere: nothing is written, and dns_records lists what to create there"
+  type        = string
+  default     = null
+}
+
+variable "dns_ready" {
+  description = "Whether the certificate's validation records exist, so it can be waited for and the distribution built. Always true with a hosted zone, where they are written here"
+  type        = bool
+}
+
+variable "origin_name" {
+  description = "The name CloudFront reaches the instance by for this site, published as an A record for its Elastic IP"
+  type        = string
+}
+
+variable "origin_zone_id" {
+  description = "Route 53 hosted zone that holds origin_name"
   type        = string
 }
 
@@ -20,7 +42,7 @@ variable "disable_cache" {
 }
 
 variable "instance_public_ip" {
-  description = "Elastic IP of the web server. Published as origin.<domain>, which CloudFront uses to reach it"
+  description = "Elastic IP of the web server, published as origin_name"
   type        = string
 }
 

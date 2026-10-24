@@ -9,7 +9,10 @@
 # This is the only check here that makes a request the way a reader would.
 
 locals {
-  canary_domains = join(",", keys(var.domains))
+  # A site whose DNS is hosted elsewhere joins once its certificate's records
+  # exist; until its hostnames point at the distribution, the canary checks
+  # whatever still serves them.
+  canary_domains = join(",", [for d, s in local.sites : d if s.dns_ready])
 
   # The alarm's period has to match how often the canary actually runs. Leave
   # it hardcoded and a schedule change silently breaks the alarm: with a

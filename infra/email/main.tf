@@ -15,12 +15,19 @@ locals {
     CostCenter = "Bugfloyd/Websites/Email"
   }
 
+  # Records are written only into a zone of ours. For DNS hosted elsewhere they
+  # are in dns_records, for whoever manages that DNS to create.
+  zoned = { for d, s in var.domains : d => s if s.zone_id != null }
+
   # Easy DKIM issues three keys per domain. Keyed by domain and position, so the
   # plan knows every record before SES has issued the tokens that name them.
   dkim_records = {
-    for pair in setproduct(keys(var.domains), range(3)) :
+    for pair in setproduct(keys(local.zoned), range(3)) :
     "${pair[0]}/${pair[1]}" => { domain = pair[0], index = pair[1] }
   }
+
+  mail_from_mx  = "10 feedback-smtp.${data.aws_region.current.region}.amazonses.com"
+  mail_from_spf = "v=spf1 include:amazonses.com ~all"
 }
 
 # Every identity sends through this set by default, so bounces, complaints and
@@ -101,7 +108,7 @@ resource "aws_sesv2_email_identity" "site" {
 resource "aws_route53_record" "dkim" {
   for_each = local.dkim_records
 
-  zone_id = var.domains[each.value.domain]
+  zone_id = var.domains[each.value.domain].zone_id
   name    = "${aws_sesv2_email_identity.site[each.value.domain].dkim_signing_attributes[0].tokens[each.value.index]}._domainkey.${each.value.domain}"
   type    = "CNAME"
   ttl     = 1800
@@ -122,31 +129,33 @@ resource "aws_sesv2_email_identity_mail_from_attributes" "site" {
 }
 
 resource "aws_route53_record" "mail_from_mx" {
-  for_each = var.domains
+  for_each = local.zoned
 
-  zone_id = each.value
+  zone_id = each.value.zone_id
   name    = "${var.mail_from_subdomain}.${each.key}"
   type    = "MX"
   ttl     = 1800
-  records = ["10 feedback-smtp.${data.aws_region.current.region}.amazonses.com"]
+  records = [local.mail_from_mx]
 }
 
 resource "aws_route53_record" "mail_from_spf" {
-  for_each = var.domains
+  for_each = local.zoned
 
-  zone_id = each.value
+  zone_id = each.value.zone_id
   name    = "${var.mail_from_subdomain}.${each.key}"
   type    = "TXT"
   ttl     = 1800
-  records = ["v=spf1 include:amazonses.com ~all"]
+  records = [local.mail_from_spf]
 }
 
+# A DMARC record on a subdomain overrides the policy its parent domain sets for
+# it, so a site on someone else's subdomain should publish none.
 resource "aws_route53_record" "dmarc" {
-  for_each = var.dmarc_record == null ? {} : var.domains
+  for_each = { for d, s in local.zoned : d => s if s.dmarc_record != null }
 
-  zone_id = each.value
+  zone_id = each.value.zone_id
   name    = "_dmarc.${each.key}"
   type    = "TXT"
   ttl     = 1800
-  records = [var.dmarc_record]
+  records = [each.value.dmarc_record]
 }

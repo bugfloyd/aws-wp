@@ -29,6 +29,29 @@ resource "random_password" "origin_secret" {
   special = false
 }
 
+locals {
+  sites = {
+    for domain, site in var.domains : domain => {
+      zone_id = site.zone_id
+      aliases = site.aliases == null ? ["www.${domain}"] : site.aliases
+
+      # The name CloudFront reaches the instance by for this site. See the
+      # origin record in cert_cloudfront_dns/cloudfront.tf.
+      origin = "${domain}.${var.origin_domain}"
+
+      # Whether the certificate's validation records exist. Terraform writes them
+      # into a zone of its own; anywhere else someone has to, and says so.
+      dns_ready = site.zone_id != null || site.dns_ready
+
+      # Whether the site has a distribution, which needs its certificate.
+      distribution = var.enable_edge && (site.zone_id != null || site.dns_ready)
+
+      email        = site.email
+      dmarc_record = site.dmarc_record == null ? var.email_dmarc_record : (site.dmarc_record == "" ? null : site.dmarc_record)
+    }
+  }
+}
+
 # The edge tier is separable from the server.
 #
 # A CloudFront alternate domain name can belong to only one distribution at a
@@ -39,10 +62,15 @@ resource "random_password" "origin_secret" {
 module "websites_cert_cloudfront_dns" {
   source = "./cert_cloudfront_dns"
 
-  for_each = var.enable_edge ? var.domains : {}
+  for_each = var.enable_edge ? local.sites : {}
 
-  domain             = each.key
-  hosted_zone_id     = each.value
+  domain         = each.key
+  aliases        = each.value.aliases
+  hosted_zone_id = each.value.zone_id
+  dns_ready      = each.value.dns_ready
+  origin_name    = each.value.origin
+  origin_zone_id = var.origin_zone_id
+
   logging_bucket     = aws_s3_bucket.cloudfront_logging_bucket.id
   instance_public_ip = aws_eip.webserver.public_ip
   origin_http_port   = var.webserver_http_port
@@ -66,3 +94,14 @@ module "websites_cert_cloudfront_dns" {
   }
 }
 
+# What Terraform could not write: every record a site whose DNS is hosted
+# elsewhere needs, for whoever manages that DNS to create.
+output "dns_records" {
+  description = "Per site whose DNS is hosted elsewhere, the records to create there. The certificate's validation records come first and are needed before dns_ready; the site's own hostnames appear once its distribution exists"
+  value = {
+    for domain, site in local.sites : domain => concat(
+      var.enable_edge ? module.websites_cert_cloudfront_dns[domain].dns_records : [],
+      var.enable_email && site.email ? module.email[0].dns_records[domain] : [],
+    ) if site.zone_id == null
+  }
+}

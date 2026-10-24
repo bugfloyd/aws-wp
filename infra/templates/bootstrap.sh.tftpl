@@ -19,6 +19,12 @@ HTTP_PORT="${http_port}"
 CONFIG_BUCKET="${config_bucket}"
 # config-revision: ${config_revision}
 DOMAINS=(${domain_list})
+# Every other name each site answers to: its aliases and its origin name.
+declare -A VHOST_ALIASES=(
+%{ for domain, names in vhost_aliases ~}
+  ["${domain}"]="${names}"
+%{ endfor ~}
+)
 
 # ---------------------------------------------------------------------------
 # 1. Trim attack surface
@@ -261,7 +267,7 @@ for DOMAIN in "$${DOMAINS[@]}"; do
   # state, regenerated on every boot from the user data.
   mkdir -p "/usr/local/lsws/conf/vhosts/$DOMAIN"
   cp /tmp/vhconf.template "/usr/local/lsws/conf/vhosts/$DOMAIN/vhconf.conf"
-  sed -i "s/__DOMAIN__/$DOMAIN/g" "/usr/local/lsws/conf/vhosts/$DOMAIN/vhconf.conf"
+  sed -i "s/__DOMAIN__/$DOMAIN/g; s/__ALIASES__/$${VHOST_ALIASES[$DOMAIN]}/g" "/usr/local/lsws/conf/vhosts/$DOMAIN/vhconf.conf"
   chown -R lsadm:www-data "/usr/local/lsws/conf/vhosts/$DOMAIN"
 
   # Serve a placeholder until WordPress exists, so anything checking the site

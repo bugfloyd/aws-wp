@@ -1,8 +1,10 @@
 # Outbound mail through SES.
 #
-# Each site's domain becomes an SES identity: DKIM keys, a MAIL FROM subdomain
-# and a DMARC record in its zone, so mail sent as the site passes SPF, DKIM and
-# DMARC. Bounce, complaint and reject events go to alert_email.
+# Each site's domain becomes an SES identity, unless the site sets email = false:
+# DKIM keys, a MAIL FROM subdomain and a DMARC record in its zone, so mail sent
+# as the site passes SPF, DKIM and DMARC. For DNS hosted elsewhere the records
+# are in dns_records instead. Bounce, complaint and reject events go to
+# alert_email.
 #
 # A new account starts in the SES sandbox, which delivers only to verified
 # addresses, up to 200 a day. Leaving it is a request to AWS (README → Email),
@@ -13,9 +15,8 @@ module "email" {
   count  = var.enable_email ? 1 : 0
 
   name                = var.stack_name
-  domains             = var.domains
+  domains             = { for d, s in local.sites : d => { zone_id = s.zone_id, dmarc_record = s.dmarc_record } if s.email }
   mail_from_subdomain = var.email_mail_from_subdomain
-  dmarc_record        = var.email_dmarc_record
 }
 
 # Needs the same one-time confirmation click as the alarms' subscription.
